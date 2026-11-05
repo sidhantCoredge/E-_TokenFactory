@@ -8,11 +8,13 @@ T="$BUNDLE_DIR/tars"; [ -s "$T/INDEX" ] || { echo "no $T/INDEX - bundle missing"
 REFS=$(cut -d'|' -f2 "$T/INDEX" | tr '\n' ' ')
 FILES=$(cut -d'|' -f1 "$T/INDEX" | tr '\n' ' ')
 # digest-pinned images: containerd needs the name@sha256 form too (pods reference @sha256)
+PAIRS=$(awk -F'|' '{print $1"="$2}' "$T/INDEX" | tr '\n' ' ')
 PINS=$(awk -F'|' '$3!=""{print $2"="$3}' "$T/INDEX" | tr '\n' ' ')
 IMPORT_SCRIPT='
 set -e
 cd /tmp
-for f in $FILES; do
+for pr in $PAIRS; do f=${pr%%=*}; r=${pr#*=}
+  if ctr -n k8s.io images ls -q | grep -qxF "$r"; then echo "present  $f"; continue; fi
   [ -n "$FETCH" ] && curl -sf "$FETCH/$f" -o "/tmp/$f"
   ctr -n k8s.io images import --all-platforms "/tmp/$f" >/dev/null && echo "imported $f"; rm -f "/tmp/$f"
 done
@@ -42,6 +44,7 @@ spec:
     securityContext: { privileged: true }
     env:
     - { name: FILES, value: "$FILES" }
+    - { name: PAIRS, value: "$PAIRS" }
     - { name: REFS, value: "$REFS" }
     - { name: PINS, value: "$PINS" }
     - { name: FETCH, value: "http://$HOST_IP:$PORT" }
@@ -60,7 +63,7 @@ YAML
     [ -n "$NODES" ] || { echo "set NODES in config.env"; exit 1; }
     for n in $NODES; do echo "== $n =="
       ssh "$n" 'mkdir -p /tmp/etisalat-tars' && scp -q $(for f in $FILES; do echo "$T/$f"; done) "$n:/tmp/etisalat-tars/"
-      ssh "$n" "sudo env FILES='$FILES' REFS='$REFS' PINS='$PINS' FETCH='' bash -c 'cd /tmp/etisalat-tars; $(echo "$IMPORT_SCRIPT" | sed "s#/tmp/\\\$f#/tmp/etisalat-tars/\\\$f#g")'"
+      ssh "$n" "sudo env FILES='$FILES' PAIRS='$PAIRS' REFS='$REFS' PINS='$PINS' FETCH='' bash -c 'cd /tmp/etisalat-tars; $(echo "$IMPORT_SCRIPT" | sed "s#/tmp/\\\$f#/tmp/etisalat-tars/\\\$f#g")'"
     done;;
   *) echo "usage: load-images.sh [pod|ssh]"; exit 1;;
 esac

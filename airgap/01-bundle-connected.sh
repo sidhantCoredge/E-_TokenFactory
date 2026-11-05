@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # RUN ON THE INTERNET-CONNECTED MAC/LAPTOP, from the package root. Builds ./bundle/ : image TAR files + charts + CRDs + jar + helm.
-# Needs: skopeo, helm, curl, tar, envsubst.  Logins first:  skopeo login docker.io   skopeo login ghcr.io  (ghcr needs a READ token for infinia-technology)
+# Needs: skopeo, helm, curl, tar, perl.  Logins first:  skopeo login docker.io   skopeo login ghcr.io  (ghcr needs a READ token for infinia-technology)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . airgap/env.sh
@@ -9,18 +9,19 @@ case "$TF_TAG$BRAND_TAG" in *REPLACE*) echo "set TF_TAG and BRAND_TAG in config.
 command -v skopeo >/dev/null || { echo "skopeo missing (brew install skopeo)"; exit 1; }
 
 echo "== images -> tar files (one per image, named $REGISTRY/<path>) =="
-: > "$BUNDLE_DIR/tars/INDEX"
-grep -vE '^\s*(#|$)' airgap/images.txt | envsubst '${TF_TAG} ${BRAND_TAG}' | while IFS='|' read -r src dst mode; do
+: > "$BUNDLE_DIR/tars/INDEX"; FAILED=""
+while IFS='|' read -r src dst mode; do
   src=$(echo $src); dst=$(echo $dst); mode=$(echo $mode)
   name=$(echo "$dst" | tr '/:@' '___'); tar="$BUNDLE_DIR/tars/$name.tar"
   case "$dst" in *@sha256:*) base="${dst%@*}"; case "${base##*/}" in *:*) base="${base%:*}";; esac; ref="$REGISTRY/$base:pinned-${dst##*:}"; digest="${dst##*:}";; *) ref="$REGISTRY/$dst"; digest="";; esac
-  if [ ! -s "$tar" ]; then
-    flags="--override-os linux --override-arch ${PLATFORM#linux/}"; [ "$mode" = all ] && flags="--all --preserve-digests"
-    echo "pull  $src"
-    rm -f "$tar.part"; skopeo copy $flags "docker://$src" "oci-archive:$tar.part:$ref" && mv "$tar.part" "$tar"
-  else echo "skip  $name (already built)"; fi
   printf '%s|%s|%s\n' "$name.tar" "$ref" "$digest" >> "$BUNDLE_DIR/tars/INDEX"
-done
+  if [ -s "$tar" ]; then echo "skip  $name (already built)"; continue; fi
+  from="$src"; case "$src" in *@sha256:*) r="${src%@*}"; r="${r%:*}"; from="$r@${src##*@}";; esac   # skopeo rejects tag+digest: use repo@digest
+  flags="--override-os linux --override-arch ${PLATFORM#linux/}"; [ "$mode" = all ] && flags="--all --preserve-digests"
+  echo "pull  $from"; rm -f "$tar.part"
+  if skopeo copy $flags "docker://$from" "oci-archive:$tar.part:$ref"; then mv "$tar.part" "$tar"; else FAILED="$FAILED\n  $src"; fi
+done < <(grep -vE '^\s*(#|$)' airgap/images.txt | envsub TF_TAG BRAND_TAG)
+[ -z "$FAILED" ] || printf "\nFAILED images (see DEPLOY.md, step A5 notes):$FAILED\n\n"
 
 echo "== helm charts =="
 ( cd "$REPO/helm/tokenfactory" && helm dependency build )
@@ -41,4 +42,7 @@ curl -fsSL -o "$BUNDLE_DIR/jars/keycloak-2fa-email-authenticator-26.5.0-KC26.7.3
  https://repo1.maven.org/maven2/io/github/mesutpiskin/keycloak-2fa-email-authenticator/26.5.0-KC26.7.3/keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar
 [ -x "$BUNDLE_DIR/tools/helm" ] || { curl -fsSL https://get.helm.sh/helm-v3.18.6-linux-amd64.tar.gz | tar -xz -C "$BUNDLE_DIR/tools" --strip-components=1 linux-amd64/helm; }
 
+[ -x "$BUNDLE_DIR/tools/kubectl" ] || { curl -fsSL -o "$BUNDLE_DIR/tools/kubectl" https://dl.k8s.io/release/v1.35.7/bin/linux/amd64/kubectl && chmod +x "$BUNDLE_DIR/tools/kubectl"; }
+
 echo "== done. total size:"; du -sh "$BUNDLE_DIR"
+n=$(ls "$BUNDLE_DIR"/tars/*.tar 2>/dev/null | wc -l); t=$(wc -l < "$BUNDLE_DIR/tars/INDEX"); echo "image tars: $n of $t"; [ "$n" = "$t" ] || echo "NOT COMPLETE: build the missing tars (minio: airgap/fetch-minio-from-acr.sh on the jumphost)"

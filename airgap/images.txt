@@ -13,10 +13,12 @@ ghcr.io/infinia-technology/ai-gateway-platform/tf-relay:${TF_TAG}      | infinia
 ghcr.io/infinia-technology/ai-gateway-platform/tf-shim:${TF_TAG}       | infinia-technology/ai-gateway-platform/tf-shim:${TF_TAG}       | amd64
 ghcr.io/infinia-technology/ai-gateway-platform/tf-warden:${TF_TAG}     | infinia-technology/ai-gateway-platform/tf-warden:${TF_TAG}     | amd64
 # ---- Etisalat-branded web images (tag = global.brandImages.*.tag) ----
+# tf-docs-web: NO Etisalat-branded image exists. tf-accounts' `legal-src` init container copies the legal pages out of this image, so it must exist
+# under the branded name. LAB WORKAROUND: the default-brand image is stored under the branded tag (legal pages = default brand).
+# For production Etisalat: build `tf-docs-web:0.17.x-etisalat-<sha>`, then replace the source tag below by ${BRAND_TAG}.
 ghcr.io/infinia-technology/ai-gateway-platform/tf-portal-web:${BRAND_TAG} | infinia-technology/ai-gateway-platform/tf-portal-web:${BRAND_TAG} | amd64
 ghcr.io/infinia-technology/ai-gateway-platform/tf-admin-web:${BRAND_TAG}  | infinia-technology/ai-gateway-platform/tf-admin-web:${BRAND_TAG}  | amd64
 ghcr.io/infinia-technology/ai-gateway-platform/tf-site-web:${BRAND_TAG}   | infinia-technology/ai-gateway-platform/tf-site-web:${BRAND_TAG}   | amd64
-ghcr.io/infinia-technology/ai-gateway-platform/tf-docs-web:${BRAND_TAG}   | infinia-technology/ai-gateway-platform/tf-docs-web:${BRAND_TAG}   | amd64
 # ---- Umbrella-chart infra (helm template of chart 0.17.2 + values-tf-etisalat.yaml) ----
 quay.io/keycloak/keycloak@sha256:37dbaf6f0722c9ec246335f36e1ef8b2e6cb960f7c27e0d8c615121a3d475a85 | keycloak/keycloak@sha256:37dbaf6f0722c9ec246335f36e1ef8b2e6cb960f7c27e0d8c615121a3d475a85 | all
 docker.io/openfga/openfga:v1.8.9                                  | openfga/openfga:v1.8.9                                  | amd64
@@ -47,3 +49,4 @@ docker.io/alpine/k8s:1.35.5                                       | alpine/k8s:1
 docker.io/curlimages/curl:8.23.0                                  | curlimages/curl:8.23.0                                  | amd64
 # ---- Ingress controller (F5 NGINX Ingress Controller 3.6.2, chart nginx-ingress 1.3.2 — same as prod-k8s) ----
 docker.io/nginx/nginx-ingress:3.6.2                               | nginx/nginx-ingress:3.6.2                               | amd64
+ghcr.io/infinia-technology/ai-gateway-platform/tf-docs-web:${TF_TAG} | infinia-technology/ai-gateway-platform/tf-docs-web:${BRAND_TAG} | amd64

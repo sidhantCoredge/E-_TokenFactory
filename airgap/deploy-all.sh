@@ -17,16 +17,17 @@ need(){ command -v "$1" >/dev/null 2>&1 || die "missing tool: $1"; }
 wait_for(){ # desc timeout_s cmd...
   local d="$1" t="$2"; shift 2; local s=$SECONDS
   until "$@" >/dev/null 2>&1; do [ $((SECONDS-s)) -gt "$t" ] && die "timeout (${t}s) waiting for: $d"; sleep 5; done; echo "  ok: $d"; }
-VARS='${REGISTRY} ${TF_TAG} ${BRAND_TAG} ${DOMAIN} ${SUPPORT_EMAIL} ${STORAGE_CLASS} ${PLATFORM_ADMIN_EMAIL} ${SMTP_HOST} ${SMTP_PORT} ${SMTP_USER} ${KEYCLOAK_JAR_URL}'
+VARS='REGISTRY TF_TAG BRAND_TAG DOMAIN SUPPORT_EMAIL STORAGE_CLASS PLATFORM_ADMIN_EMAIL SMTP_HOST SMTP_PORT SMTP_USER KEYCLOAK_JAR_URL DOCS_WEB_ENABLED'
 DRY=0
+export DOCS_WEB_ENABLED=$([ "${DOCS_WEB:-no}" = yes ] && echo true || echo false)
 kc(){ if [ $DRY = 1 ]; then echo "  [dry-run] kubectl $*"; else kubectl "$@"; fi; }
 
 phase_check(){
   log "check"
-  for t in kubectl helm envsubst openssl perl python3 make; do need $t; done
+  for t in kubectl helm openssl perl python3; do need $t; done   # kubectl+helm come from bundle/tools; the rest are standard on Ubuntu
   [ -f "$KUBECONFIG_FILE" ] || die "KUBECONFIG_FILE=$KUBECONFIG_FILE not found"
   local bad; bad=$(grep -nE 'REPLACE_' "$ROOT/config.env" | grep -v '^[0-9]*:\s*#' || true)
-  [ -z "$bad" ] || die "config.env still has REPLACE_ values:\n$bad"
+  [ -z "$bad" ] || die "config.env still has REPLACE_ values:"$'\n'"$bad"
   for v in REGISTRY NAMESPACE DOMAIN TF_TAG BRAND_TAG STORAGE_CLASS SMTP_HOST SMTP_PORT SMTP_USER KEYCLOAK_JAR_URL TLS_CERT TLS_KEY CH_DATA_SIZE CH_LOG_SIZE; do [ -n "${!v:-}" ] || die "config.env: $v is empty"; done
   case "$REGISTRY" in *://*) die "REGISTRY must be host[:port] without scheme";; esac
   [ -f "$TLS_CERT" ] && [ -f "$TLS_KEY" ] || die "TLS_CERT / TLS_KEY files not found"
@@ -61,7 +62,7 @@ phase_render(){
   log "render values -> $OUT"
   umask 077; mkdir -p "$OUT"
   for n in umbrella openmeter nginx-ingress envoy-gateway ai-gateway; do
-    envsubst "$VARS" < "$ROOT/values/$n.values.yaml.tmpl" > "$OUT/$n.yaml"
+    envsub $VARS < "$ROOT/values/$n.values.yaml.tmpl" > "$OUT/$n.yaml"
     ! grep -q '\${' "$OUT/$n.yaml" || die "unreplaced \${VAR} in $OUT/$n.yaml: $(grep -n '\${' "$OUT/$n.yaml" | head -2)"
   done
   if [ "${LB_INTERNAL:-no}" = yes ]; then cp "$ROOT/values/lb-internal.umbrella.yaml" "$OUT/lb-umbrella.yaml"; cp "$ROOT/values/lb-internal.nginx.yaml" "$OUT/lb-nginx.yaml"
@@ -153,13 +154,32 @@ phase_openmeter(){
     --post-renderer "$CH/postrender/postrender.sh" --wait --timeout 60m
 }
 
+# the five service-identity keys go in a 0600 values file (never on a command line: install.sh prints the helm command into the log)
+write_service_keys(){ mkdir -p "$OUT"; ( umask 077; cat > "$OUT/service-keys.yaml" <<YAML
+global:
+  secrets:
+    serviceKeyTfAccounts: "$1"
+    serviceKeyTfLedger: "$2"
+    serviceKeyTfControl: "$3"
+    serviceKeyTfRelay: "$4"
+    serviceKeyTfWarden: "$5"
+YAML
+); }
+
 phase_app(){
-  log "TokenFactory umbrella (make install-app)"
+  log "TokenFactory umbrella (install.sh = what `make install-app` runs)"
   [ -f "$KEYFILE" ] || die "$KEYFILE missing (run phase secrets)"
   . "$KEYFILE"
-  export OM_CHECK_IMAGE="$REGISTRY/busybox:1.36"        # preflight's one-shot OpenMeter probe pod
-  make -C "$REPO/helm/setup" install-app NAMESPACE="$NAMESPACE" VALUES=helm/tokenfactory/values-tf-etisalat.yaml \
-    HELM_ARGS="-f $OUT/umbrella.yaml -f $OUT/lb-umbrella.yaml --timeout 30m --set global.secrets.serviceKeyTfAccounts=$SERVICE_KEY_TF_ACCOUNTS --set global.secrets.serviceKeyTfLedger=$SERVICE_KEY_TF_LEDGER --set global.secrets.serviceKeyTfControl=$SERVICE_KEY_TF_CONTROL --set global.secrets.serviceKeyTfRelay=$SERVICE_KEY_TF_RELAY --set global.secrets.serviceKeyTfWarden=$SERVICE_KEY_TF_WARDEN"
+  write_service_keys "$SERVICE_KEY_TF_ACCOUNTS" "$SERVICE_KEY_TF_LEDGER" "$SERVICE_KEY_TF_CONTROL" "$SERVICE_KEY_TF_RELAY" "$SERVICE_KEY_TF_WARDEN"
+  # Own pre-install checks instead of preflight.sh: its OpenMeter probe pod runs in the `openmeter` namespace, and OpenMeter's NetworkPolicy
+  # (openmeter-api-restrict, enforced by Cilium) admits ONLY tf-ledger, so that probe can never succeed on a policy-enforcing cluster.
+  for crd in gateways.gateway.networking.k8s.io aigatewayroutes.aigateway.envoyproxy.io envoyproxies.gateway.envoyproxy.io; do kubectl get crd "$crd" >/dev/null 2>&1 || die "CRD $crd missing - run phase controllers"; done
+  [ "$(kubectl -n openmeter get deploy openmeter-api -o jsonpath='{.status.availableReplicas}' 2>/dev/null)" -ge 1 ] 2>/dev/null || die "OpenMeter API is not ready - run phase openmeter"
+  kubectl -n "$NAMESPACE" get secret tokenfactory-secrets tf-etisalat-tls >/dev/null || die "tokenfactory-secrets / tf-etisalat-tls missing in $NAMESPACE"
+  echo "  pre-install checks ok (CRDs, OpenMeter API, secrets)"
+  SKIP_PREFLIGHT=1 CHART_DIR="$REPO/helm/tokenfactory" RELEASE=tokenfactory NAMESPACE="$NAMESPACE" VALUES="$REPO/helm/tokenfactory/values-tf-etisalat.yaml" \
+    HELM_ARGS="-f $OUT/umbrella.yaml -f $OUT/lb-umbrella.yaml -f $OUT/service-keys.yaml --timeout 30m" \
+    "$REPO/helm/setup/scripts/install.sh"
 }
 
 phase_verify(){
@@ -188,8 +208,8 @@ phase_dryrun(){
   T aieg "$C/ai-gateway-helm-v1.0.0.tgz" -n envoy-ai-gateway-system -f "$OUT/ai-gateway.yaml"
   T nginx-ingress "$C/nginx-ingress-1.3.2.tgz" -n nginx-ingress -f "$OUT/nginx-ingress.yaml" -f "$OUT/lb-nginx.yaml"
   T openmeter "$REPO/helm/infrastructure/openmeter" -n openmeter -f "$OUT/openmeter.yaml" --set openmeter.clickhouseCredentials.existingSecretName=om-clickhouse-pw --set openmeter.config.postgres.url=x --set openmeter.svix.database.dsn=x
-  T tokenfactory "$REPO/helm/tokenfactory" -n "$NAMESPACE" -f "$REPO/helm/tokenfactory/values-tf-etisalat.yaml" -f "$OUT/umbrella.yaml" -f "$OUT/lb-umbrella.yaml" \
-    --set global.secrets.serviceKeyTfAccounts=x --set global.secrets.serviceKeyTfLedger=x --set global.secrets.serviceKeyTfControl=x --set global.secrets.serviceKeyTfRelay=x --set global.secrets.serviceKeyTfWarden=x \
+  write_service_keys dryrun dryrun dryrun dryrun dryrun
+  T tokenfactory "$REPO/helm/tokenfactory" -n "$NAMESPACE" -f "$REPO/helm/tokenfactory/values-tf-etisalat.yaml" -f "$OUT/umbrella.yaml" -f "$OUT/lb-umbrella.yaml" -f "$OUT/service-keys.yaml" \
     --set-file keycloak.theme.archive="$REPO/brands/etisalat/keycloak/theme.tar.gz.b64"
   log "dry-run PASSED - safe to run: ./deploy-all.sh all"
 }

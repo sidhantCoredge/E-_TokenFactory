@@ -180,5 +180,5 @@ tf-ops:        { replicas: 3, resources: { requests: { cpu: 20m,  memory: 48Mi  
 tf-warden:     { replicas: 3, resources: { requests: { cpu: 25m,  memory: 256Mi }, limits: { cpu: 1000m, memory: 1Gi   } } }
 tf-portal-web: { replicas: 3, resources: { requests: { cpu: 50m,  memory: 32Mi  }, limits: { cpu: 200m,  memory: 1Gi   } } }
 tf-admin-web:  { replicas: 3, resources: { requests: { cpu: 50m,  memory: 32Mi  }, limits: { cpu: 200m,  memory: 1Gi   } } }
-tf-docs-web:   { replicas: 3, resources: { requests: { cpu: 50m,  memory: 96Mi  }, limits: { cpu: 300m,  memory: 256Mi } } }
+tf-docs-web:   { enabled: ${DOCS_WEB_ENABLED}, replicas: 3, resources: { requests: { cpu: 50m,  memory: 96Mi  }, limits: { cpu: 300m,  memory: 256Mi } } }
 tf-site-web:   { replicas: 3, resources: { requests: { cpu: 50m,  memory: 64Mi  }, limits: { cpu: 300m,  memory: 256Mi } } }
