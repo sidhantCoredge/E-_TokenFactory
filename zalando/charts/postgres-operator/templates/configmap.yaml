@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-operator
+  namespace: {{ .Release.Namespace }}
+data:
+{{- $c := deepCopy .Values.config }}
+{{- $_ := set $c "docker_image" (printf "%s/%s" .Values.registry $c.docker_image) }}
+{{- $_ := set $c "logical_backup_docker_image" (printf "%s/%s" .Values.registry $c.logical_backup_docker_image) }}
+{{- $_ := set $c "connection_pooler_image" (printf "%s/%s" .Values.registry $c.connection_pooler_image) }}
+{{ toYaml $c | indent 2 }}

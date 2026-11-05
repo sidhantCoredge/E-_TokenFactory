@@ -1,0 +1,73 @@
+# OpenMeter overlay (separate Helm release in namespace `openmeter`). Placeholders come from config.env.
+# DB passwords and the ClickHouse password are NOT here: deploy-all.sh passes them with --set at install time.
+# >>> RESOURCE SIZING: edit the `resources:` / `size:` / `replicaCount:` blocks below (sections M1-M5). <<<
+global:
+  imageRegistry: "${REGISTRY}"              # bitnamilegacy kafka/redis
+  storageClass: "${STORAGE_CLASS}"          # kafka + redis PVCs (ClickHouse PVC class/size: see config.env CH_* - upstream template, patched by airgap/03)
+  defaultStorageClass: "${STORAGE_CLASS}"
+openmeter:
+  imagePullSecrets:
+    - name: registry-pull
+  image:
+    repository: "${REGISTRY}/openmeterio/openmeter"
+    tag: "v1.0.0-beta.231@sha256:f3bc8075ebad57a0b02edf5f173892a9bcfbbda97af5481713fed892ef679f5f"
+  # ── Postgres = the SAME Zalando pgdb as TokenFactory (databases `openmeter` and `svix`) ──
+  postgresql:
+    enabled: false
+  config:
+    postgres:
+      autoMigrate: migration
+      # url is set by deploy-all.sh via --set (contains the password)
+  svix:
+    enabled: true
+    image:
+      repository: "${REGISTRY}/svix/svix-server"
+    replicaCount: 1
+    resources:                               # M2
+      requests: { cpu: 100m, memory: 256Mi }
+      limits:   { cpu: 500m, memory: 512Mi }
+  # M1. OpenMeter app workloads (api, sink-worker, balance-worker, notification-service, billing-worker) share this block
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+  api:                 { replicaCount: 2 }   # M1 (stateless; HA)
+  sinkWorker:          { replicaCount: 1 }
+  balanceWorker:       { replicaCount: 1 }
+  notificationService: { replicaCount: 1 }
+  billingWorker:       { replicaCount: 1 }
+  # M3. Kafka (3 controllers = HA) ──
+  kafka:
+    controller:
+      replicaCount: 3
+      resources:
+        requests: { cpu: 250m, memory: 1536Mi }
+        limits:   { memory: 2560Mi }
+      heapOpts: "-Xmx1024m -Xms1024m"        # keep ~1.5 GiB below limits.memory
+      persistence:
+        size: 20Gi
+  # M4. ClickHouse (single node via Altinity operator). CPU/RAM here; DISK = config.env CH_DATA_SIZE / CH_LOG_SIZE
+  clickhouseGuardrails:
+    memoryGuard: { image: { repository: "${REGISTRY}/alpine/k8s" } }
+    verify:      { image: { repository: "${REGISTRY}/alpine/k8s" } }
+    resources:
+      requests: { cpu: 500m, memory: 2Gi }
+      limits:   { memory: 6Gi }              # the guardrails derive max_memory_usage from this limit
+  # M5. Redis (bitnami, replication: 1 master + 3 replicas)
+  redis:
+    master:
+      resources:
+        requests: { cpu: 100m, memory: 128Mi }
+        limits:   { cpu: 150m, memory: 192Mi }
+      persistence: { size: 2Gi }
+    replica:
+      resources:
+        requests: { cpu: 100m, memory: 128Mi }
+        limits:   { cpu: 150m, memory: 192Mi }
+      persistence: { size: 2Gi }
+  # ── images hardcoded in this wrapper / altinity subchart (all point at the internal registry) ──
+  provisionMeters:  { image: { repository: "${REGISTRY}/curlimages/curl" } }
+  stripeApp:        { image: { repository: "${REGISTRY}/curlimages/curl" } }
+  clickhouseTTL: { image: { repository: "${REGISTRY}/alpine/k8s" } }
+  altinity-clickhouse-operator:
+    operator: { image: { repository: "${REGISTRY}/altinity/clickhouse-operator" } }
+    metrics:  { image: { repository: "${REGISTRY}/altinity/metrics-exporter" } }

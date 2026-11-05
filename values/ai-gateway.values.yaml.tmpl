@@ -1,0 +1,12 @@
+# Envoy AI Gateway controller v1.0.0 (chart ai-gateway-helm).
+# >>> RESOURCE SIZING: `controller.*` <<<
+global:
+  imagePullSecrets: [ { name: registry-pull } ]
+controller:
+  image: { repository: "${REGISTRY}/envoyproxy/ai-gateway-controller" }
+  replicaCount: 2
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits:   { memory: 512Mi }
+extProc:
+  image: { repository: "${REGISTRY}/envoyproxy/ai-gateway-extproc" }

@@ -1,0 +1,22 @@
+# F5 NGINX Ingress Controller (chart nginx-ingress 1.3.2, app 3.6.2) - serves portal/admin/www/auth. Placeholders come from config.env.
+# >>> RESOURCE SIZING: `controller.resources` / `replicaCount` <<<
+controller:
+  image:
+    repository: "${REGISTRY}/nginx/nginx-ingress"
+  replicaCount: 2
+  resources:
+    requests: { cpu: 200m, memory: 256Mi }
+    limits:   { cpu: "2",  memory: 1Gi }
+  ingressClass: { name: nginx, create: true }
+  telemetryReporting: { enable: false }         # default true = the controller tries to phone home
+  serviceAccount: { imagePullSecretName: registry-pull }
+  service: { type: LoadBalancer }
+  podDisruptionBudget: { enabled: true, minAvailable: 1 }
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels: { app.kubernetes.io/name: nginx-ingress }

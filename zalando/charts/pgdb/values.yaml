@@ -1,0 +1,53 @@
+# pgdb sizing. ALL Postgres capacity knobs live here (instances, CPU/RAM, disk, Postgres parameters).
+# numberOfInstances needs >= that many schedulable nodes (the operator enables pod anti-affinity).
+# Disk: Zalando resizes PVCs upward when this number is raised (StorageClass must allow expansion).
+# pg_hba below is copied from prod (0.0.0.0/0 md5) - tighten to the pod CIDR if policy requires.
+registry: registry.example.local
+name: pgdb
+teamId: myteam
+image: zalando/spilo-17:4.0-p2
+numberOfInstances: 3
+postgresVersion: '16'
+volume:
+  size: 20Gi
+  storageClass: ''
+resources:
+  requests:
+    cpu: '1'
+    memory: 2Gi
+  limits:
+    cpu: '4'
+    memory: 8Gi
+parameters:
+  log_min_duration_statement: '500'
+  max_connections: '300'
+  shared_buffers: 1GB
+  synchronous_commit: 'on'
+  wal_level: replica
+patroni:
+  initdb:
+    encoding: UTF8
+    locale: en_US.UTF-8
+  pg_hba:
+  - host all all 0.0.0.0/0 md5
+  - host replication all 0.0.0.0/0 md5
+  - local all all trust
+databases:
+  tokenfactory: tokenfactory
+  keycloak: keycloak
+  openfga: openfga
+  openmeter: openmeter
+  svix: svix
+users:
+  tokenfactory:
+  - login
+  keycloak:
+  - login
+  openfga:
+  - login
+  openmeter:
+  - login
+  svix:
+  - login
+imagePullSecrets:
+- name: registry-pull

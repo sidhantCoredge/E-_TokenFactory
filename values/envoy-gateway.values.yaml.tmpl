@@ -1,0 +1,11 @@
+# Envoy Gateway controller v1.8.1 (chart gateway-helm). Applied AFTER helm/setup/scripts/envoygateway-config.yaml.
+# >>> RESOURCE SIZING: `deployment.*` <<<
+global:
+  imageRegistry: "${REGISTRY}"
+  imagePullSecrets: [ { name: registry-pull } ]
+deployment:
+  replicas: 2
+  envoyGateway:
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits:   { memory: 1024Mi }

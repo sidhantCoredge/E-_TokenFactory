@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: postgres-pod        # pre-created so the Spilo pods can pull from the internal registry (postgresql CRD has no imagePullSecrets)
+  namespace: {{ .Release.Namespace }}
+{{- with .Values.imagePullSecrets }}
+imagePullSecrets: {{- toYaml . | nindent 2 }}
+{{- end }}
+---
+apiVersion: acid.zalan.do/v1
+kind: postgresql
+metadata:
+  name: {{ .Values.name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  teamId: {{ .Values.teamId | quote }}
+  dockerImage: {{ printf "%s/%s" .Values.registry .Values.image | quote }}
+  numberOfInstances: {{ .Values.numberOfInstances }}
+  postgresql:
+    version: {{ .Values.postgresVersion | quote }}
+    parameters: {{- toYaml .Values.parameters | nindent 6 }}
+  patroni: {{- toYaml .Values.patroni | nindent 4 }}
+  resources: {{- toYaml .Values.resources | nindent 4 }}
+  volume:
+    size: {{ .Values.volume.size | quote }}
+    {{- with .Values.volume.storageClass }}
+    storageClass: {{ . | quote }}
+    {{- end }}
+  databases: {{- toYaml .Values.databases | nindent 4 }}
+  users: {{- toYaml .Values.users | nindent 4 }}

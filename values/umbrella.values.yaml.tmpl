@@ -1,0 +1,184 @@
+# TokenFactory umbrella chart overlay for Etisalat (air-gap, HA).  Layered on helm/tokenfactory/values-tf-etisalat.yaml.
+# Placeholders in braces come from config.env (rendered by deploy-all.sh). DO NOT put secrets here.
+# >>> RESOURCE SIZING: edit the `resources:` / `replicas:` blocks in THIS file (sections S1-S4). Nothing else needs touching. <<<
+
+global:
+  imageRegistry: "${REGISTRY}"               # infra images (keycloak, minio, redis, openfga, postgres, alpine, busybox)
+  image:
+    registry: "${REGISTRY}"                  # tf-* images (repository stays infinia-technology/ai-gateway-platform)
+    tag: "${TF_TAG}"                         # immutable <chart-version>-<shortsha>
+    pullPolicy: IfNotPresent
+  imagePullSecrets:
+    - name: registry-pull
+  brandImages:
+    portal: { tag: "${BRAND_TAG}", digest: "" }
+    admin:  { tag: "${BRAND_TAG}", digest: "" }
+    site:   { tag: "${BRAND_TAG}", digest: "" }
+    docs:   { tag: "${BRAND_TAG}", digest: "" }
+  urls:
+    api: "https://api.${DOMAIN}"
+    adminApi: ""
+    auth: "https://auth.${DOMAIN}"
+    portal: "https://portal.${DOMAIN}"
+    admin: "https://admin.${DOMAIN}"
+    site: "https://www.${DOMAIN}"
+  supportEmail: "${SUPPORT_EMAIL}"
+  storageClass: "${STORAGE_CLASS}"
+  # Postgres = Zalando `pgdb` (HA) in this namespace; shared by tf-* services, Keycloak, OpenFGA (and OpenMeter, separate release)
+  postgres:
+    mode: external
+    database: tokenfactory
+    user: tokenfactory
+    passwordKey: password
+    external:
+      host: "pgdb"
+      port: 5432
+      database: tokenfactory
+      user: tokenfactory
+      sslMode: require
+      existingSecret: "tokenfactory.pgdb.credentials.postgresql.acid.zalan.do"
+      passwordKey: password
+
+# ── Ingress: portal / admin / site / auth (F5 nginx.org controller). api.<domain> goes to Envoy, NOT here. ──
+ingress:
+  enabled: true
+  name: tokenfactory
+  className: nginx
+  annotations:
+    nginx.org/client-max-body-size: 128m
+    nginx.org/proxy-buffer-size: 16k          # OIDC-callback 502 fix
+    nginx.org/proxy-buffers: 8 16k
+    nginx.org/proxy-connect-timeout: 75s
+    nginx.org/proxy-read-timeout: 600s
+    nginx.org/proxy-send-timeout: 600s
+  tls:
+    - secretName: tf-etisalat-tls
+      hosts: [ "portal.${DOMAIN}", "admin.${DOMAIN}", "www.${DOMAIN}", "auth.${DOMAIN}" ]
+  hosts:
+    - { host: "www.${DOMAIN}",    service: tf-site-web,   port: 80 }
+    - { host: "portal.${DOMAIN}", service: tf-portal-web, port: 80 }
+    - { host: "admin.${DOMAIN}",  service: tf-admin-web,  port: 80 }
+    - { host: "auth.${DOMAIN}",   service: keycloak-edge, port: 80 }
+
+# ── Envoy Gateway data plane (api.<domain>) ──
+tf-gateway-resources:
+  tls:
+    hostname: "*.${DOMAIN}"
+    certSecretName: tf-etisalat-tls
+  envoyProxy:
+    spec:
+      provider:
+        kubernetes:
+          envoyDeployment:
+            replicas: 3                                                   # S1
+            container:
+              image: "${REGISTRY}/envoyproxy/envoy:distroless-v1.38.1"    # data-plane image is not in any chart
+              resources:                                                  # S1
+                requests: { cpu: 500m, memory: 512Mi }
+                limits:   { cpu: "2",  memory: 2Gi }
+            pod:
+              imagePullSecrets:
+                - name: registry-pull
+          envoyPDB:
+            minAvailable: 2
+
+# ── Identity ──
+tf-auth:
+  replicas: 3                                  # S2
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits:   { cpu: 200m, memory: 256Mi }
+  config:
+    keycloak:
+      platformAdminEmail: "${PLATFORM_ADMIN_EMAIL}"
+      smtp:
+        host: "${SMTP_HOST}"
+        port: ${SMTP_PORT}
+        user: "${SMTP_USER}"
+        from: "${SUPPORT_EMAIL}"
+
+keycloak:                                       # Keycloak HA
+  replicaCount: 3                               # S3
+  resources:
+    requests: { cpu: 500m, memory: 1Gi }
+    limits:   { cpu: "2",  memory: 3Gi }
+  jvmHeapOpts: "-Xms512m -Xmx1536m -XX:+UseContainerSupport"   # keep Xmx well below limits.memory
+  image:
+    repository: keycloak/keycloak               # chart default is quay.io/keycloak/keycloak; mirror layout drops the host. Digest pin is kept.
+  config:
+    cache: ispn                                 # distributed Infinispan cache (without it each pod has its own sessions)
+  ha:
+    cacheOwnersCount: 2
+    discovery: dns-ping                         # JGroups DNS_PING over the headless Service
+    pdb: { enabled: true, maxUnavailable: 1 }
+  affinity:                                     # spread over nodes. Change `preferred...` to `required...` once you have >=3 nodes
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels: { app.kubernetes.io/name: keycloak }
+  postgres:
+    database: keycloak
+    user: keycloak
+    external:
+      host: "pgdb"
+      port: 5432
+      database: keycloak
+      user: keycloak
+      sslMode: require
+      existingSecret: "keycloak.pgdb.credentials.postgresql.acid.zalan.do"
+      passwordKey: password
+  providers:                                    # SPI jar is downloaded by an init container -> must be served internally
+    initImage: { repository: alpine, tag: "3.22" }
+    plugins:
+      - name: mesutpiskin.email-authenticator.jar
+        url: "${KEYCLOAK_JAR_URL}"
+
+openfga:
+  postgres:
+    external:
+      host: "pgdb"
+      port: 5432
+      database: openfga
+      user: openfga
+      sslMode: require
+      existingSecret: "openfga.pgdb.credentials.postgresql.acid.zalan.do"
+      passwordKey: password
+  resources:                                    # S4
+    requests: { memory: 64Mi }
+    limits:   { memory: 256Mi }
+
+minio:                                          # single instance by design (standalone mode)
+  initContainers:
+    chownImage: { repository: "${REGISTRY}/busybox" }
+  resources:                                    # S4
+    requests: { cpu: 50m, memory: 128Mi }
+    limits:   { cpu: 300m, memory: 512Mi }
+
+redis:                                          # single instance (chart supports standalone HA only against a managed endpoint)
+  resources:                                    # S4
+    requests: { cpu: 100m, memory: 1Gi }
+    limits:   { cpu: "1", memory: 4Gi }
+
+tf-ledger:
+  replicas: 1                                   # MUST stay 1 (no leader election in tf-ledger)
+  resources:                                    # S2
+    requests: { cpu: 50m, memory: 64Mi }
+    limits:   { cpu: 300m, memory: 256Mi }
+  geoip:
+    enabled: false                              # downloads from GitHub at runtime -> off in an air-gap
+
+# ── S2. TokenFactory services: replicas + resources (defaults = chart defaults; raise for production load) ──
+tf-accounts:   { replicas: 3, resources: { requests: { cpu: 50m,  memory: 64Mi  }, limits: { cpu: 200m,  memory: 256Mi } } }
+tf-relay:      { replicas: 3, resources: { requests: { cpu: 50m,  memory: 256Mi }, limits: { cpu: 1000m, memory: 1Gi   } } }
+tf-babel:      { replicas: 3, resources: { requests: { cpu: 25m,  memory: 32Mi  }, limits: { cpu: 300m,  memory: 256Mi } } }
+tf-shim:       { replicas: 3, resources: { requests: { cpu: 25m,  memory: 256Mi }, limits: { cpu: 1000m, memory: 1Gi   } } }
+tf-control:    { replicas: 3, resources: { requests: { cpu: 25m,  memory: 64Mi  }, limits: { cpu: 500m,  memory: 256Mi } } }
+tf-ops:        { replicas: 3, resources: { requests: { cpu: 20m,  memory: 48Mi  }, limits: { cpu: 250m,  memory: 128Mi } } }
+tf-warden:     { replicas: 3, resources: { requests: { cpu: 25m,  memory: 256Mi }, limits: { cpu: 1000m, memory: 1Gi   } } }
+tf-portal-web: { replicas: 3, resources: { requests: { cpu: 50m,  memory: 32Mi  }, limits: { cpu: 200m,  memory: 1Gi   } } }
+tf-admin-web:  { replicas: 3, resources: { requests: { cpu: 50m,  memory: 32Mi  }, limits: { cpu: 200m,  memory: 1Gi   } } }
+tf-docs-web:   { replicas: 3, resources: { requests: { cpu: 50m,  memory: 96Mi  }, limits: { cpu: 300m,  memory: 256Mi } } }
+tf-site-web:   { replicas: 3, resources: { requests: { cpu: 50m,  memory: 64Mi  }, limits: { cpu: 300m,  memory: 256Mi } } }
