@@ -14,7 +14,7 @@ while IFS='|' read -r src dst mode; do
   src=$(echo $src); dst=$(echo $dst); mode=$(echo $mode)
   name=$(echo "$dst" | tr '/:@' '___'); tar="$BUNDLE_DIR/tars/$name.tar"
   case "$dst" in *@sha256:*) base="${dst%@*}"; case "${base##*/}" in *:*) base="${base%:*}";; esac; ref="$REGISTRY/$base:pinned-${dst##*:}"; digest="${dst##*:}";; *) ref="$REGISTRY/$dst"; digest="";; esac
-  printf '%s|%s|%s\n' "$name.tar" "$ref" "$digest" >> "$BUNDLE_DIR/tars/INDEX"
+  printf '%s|%s|%s|%s\n' "$name.tar" "$ref" "$digest" "${ref#"$REGISTRY"/}" >> "$BUNDLE_DIR/tars/INDEX"   # 4th column = image path without the registry prefix
   if [ -s "$tar" ]; then echo "skip  $name (already built)"; continue; fi
   from="$src"; case "$src" in *@sha256:*) r="${src%@*}"; r="${r%:*}"; from="$r@${src##*@}";; esac   # skopeo rejects tag+digest: use repo@digest
   flags="--override-os linux --override-arch ${PLATFORM#linux/}"; [ "$mode" = all ] && flags="--all --preserve-digests"
@@ -22,6 +22,10 @@ while IFS='|' read -r src dst mode; do
   if skopeo copy $flags "docker://$from" "oci-archive:$tar.part:$ref"; then mv "$tar.part" "$tar"; else FAILED="$FAILED\n  $src"; fi
 done < <(grep -vE '^\s*(#|$)' airgap/images.txt | envsub TF_TAG BRAND_TAG)
 [ -z "$FAILED" ] || printf "\nFAILED images (see DEPLOY.md, step A5 notes):$FAILED\n\n"
+
+echo "== registry:2 (only used if the site has no registry at all: airgap/02a-local-registry.sh) =="
+mkdir -p "$BUNDLE_DIR/registry"
+[ -s "$BUNDLE_DIR/registry/registry2.tar" ] || skopeo copy --override-os linux --override-arch "${PLATFORM#linux/}" docker://docker.io/library/registry:2 docker-archive:"$BUNDLE_DIR/registry/registry2.tar":registry:2 || echo "WARNING: registry:2 not bundled"
 
 echo "== helm charts =="
 ( cd "$REPO/helm/tokenfactory" && helm dependency build )

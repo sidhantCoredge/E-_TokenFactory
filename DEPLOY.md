@@ -334,6 +334,88 @@ The overlay sets `global.secrets.existingSecret: tokenfactory-secrets` (the char
 | the five `serviceKeyTf*` | not in the Secret: pod env literals | yes, in `~/.etisalat-service-keys.env`, passed through `rendered/service-keys.yaml` |
 Other objects the overlay expects to exist before the app: the pull secret (here `registry-pull`, instead of the overlay's `ghcr-secret`; the script creates it in every namespace), the gateway TLS secret `tf-etisalat-tls`, and the Zalando role Secrets `<role>.pgdb.credentials.postgresql.acid.zalan.do` (created by the operator). All of them are created by `deploy-all.sh` before the app is installed. To use your own secret manager instead (Vault, External Secrets): create `tokenfactory-secrets` with the keys above **before** running `deploy-all.sh all` — the `secrets` phase keeps an existing Secret (but still needs `~/.etisalat-service-keys.env`; create it with the five `SERVICE_KEY_TF_ACCOUNTS/LEDGER/CONTROL/RELAY/WARDEN` lines).
 
+## PART L — Internal registry instead of node tars (create → push → use), end to end
+Use this only if Etisalat has (or is willing to run) an internal registry (Harbor, Nexus, Artifactory, `registry:2`). The default flow of this document (`IMAGE_MODE=tar`) needs none. Same bundle, same scripts; only the way the images reach the nodes changes.
+| | `IMAGE_MODE=tar` (default) | `IMAGE_MODE=registry` |
+|---|---|---|
+| images reach nodes by | `ctr import` of the tars on every node | nodes **pull** from the registry |
+| extra needs | nothing | the registry, node trust of it, **`skopeo` on the install VM** (install it from the VM's OS package mirror; if impossible use `tar`) |
+| `REGISTRY` in `config.env` | name prefix only (`registry.etisalat.local`) | the real registry address |
+> Status: the tar flow was tested end to end in the lab; the registry flow reuses the same bundle but its push script has not yet been run against a real registry — treat the first run as a test.
+
+**L1. Create the registry** (pick one)
+* *Existing registry (Harbor/Nexus/Artifactory):* create **one project/repository path** for us, e.g. project `tokenfactory`, and a user or robot account with **push + pull** on it. Harbor: Projects → New project `tokenfactory` (private) → Robot Accounts → New (push & pull). Then your address is `harbor.etisalat.com/tokenfactory`.
+* *No registry at all:* start one on the install VM from the bundle (needs docker or podman on the VM):
+  ```
+  cd ~/etisalat && airgap/02a-local-registry.sh          # registry:2 on port 5000, http, data in volume etisalat-registry-data
+  ```
+  Address: `<VM-IP>:5000` (plain http, no login → leave `REGISTRY_USER/PASS` empty and set `DEST_TLS_VERIFY="false"`).
+
+**L2. Let every node trust it** (otherwise `x509: certificate signed by unknown authority` or `http: server gave HTTP response`). On **each** node, containerd (1.7+), no restart needed:
+```
+H=harbor.etisalat.com                       # the registry HOST[:port] only, no project path
+sudo mkdir -p /etc/containerd/certs.d/$H
+sudo cp etisalat-registry-ca.crt /etc/containerd/certs.d/$H/ca.crt       # the CA that signed the registry certificate
+sudo tee /etc/containerd/certs.d/$H/hosts.toml >/dev/null <<EOF
+server = "https://$H"
+[host."https://$H"]
+  capabilities = ["pull", "resolve"]
+  ca = "/etc/containerd/certs.d/$H/ca.crt"
+EOF
+```
+For the plain-http `registry:2` of L1 use `server = "http://<VM-IP>:5000"` and `[host."http://<VM-IP>:5000"]` with `capabilities = ["pull","resolve"]` and `skip_verify = true`. Also copy the CA into the VM's trust store if the VM will push over https (`DEST_TLS_VERIFY="true"`).
+
+**L3. Define it in `config.env`** — this *is* the "values.yaml" step; nothing else is edited by hand:
+```
+export IMAGE_MODE="registry"
+export REGISTRY="harbor.etisalat.com/tokenfactory"      # host[:port][/project], NO https://, NO trailing slash
+export REGISTRY_USER="robot$tokenfactory"                # leave empty for an anonymous registry
+export REGISTRY_PASS="<password or robot token>"
+export DEST_TLS_VERIFY="true"                            # "false" only for a self-signed/http registry
+```
+`deploy-all.sh render` turns `REGISTRY` into the image prefix in every chart: `global.imageRegistry` and `global.image.registry` in `rendered/umbrella.yaml` (the tf-* images, Keycloak, Redis, MinIO, OpenFGA, Postgres helpers), plus the explicit image fields of Envoy data plane, MinIO chown init, OpenMeter, NGINX ingress and the Envoy/AI-gateway controllers. See it for yourself after rendering: `cd ~/etisalat && airgap/deploy-all.sh render && grep -rn "$REGISTRY" rendered/ | head -20`. `REGISTRY_USER/PASS` become the pull secret `registry-pull` (created in all six namespaces, also set on each namespace's `default` ServiceAccount) by the `ns` phase; `imagePullSecrets` in the values already point at it.
+
+**L4. Tag + push** — nothing to tag by hand: `skopeo` copies each tar straight to its final name (the "tag" step):
+| Image (from `airgap/images.txt`) | Lands in the registry as |
+|---|---|
+| `ghcr.io/infinia-technology/ai-gateway-platform/tf-accounts:0.17.2-356be61` | `$REGISTRY/infinia-technology/ai-gateway-platform/tf-accounts:0.17.2-356be61` |
+| `docker.io/library/redis:7-alpine` | `$REGISTRY/redis:7-alpine` |
+| `quay.io/keycloak/keycloak@sha256:37dbaf…` (digest-pinned) | `$REGISTRY/keycloak/keycloak:pinned-37dbaf…` (digest preserved, so the chart's `@sha256` reference resolves) |
+| `ghcr.io/zalando/spilo-17:4.0-p2` | `$REGISTRY/zalando/spilo-17:4.0-p2` |
+Run it as part of the normal flow or alone:
+```
+cd ~/etisalat
+airgap/deploy-all.sh images          # IMAGE_MODE=registry -> airgap/02-push-registry.sh (38 images)
+```
+It ends with `registry push complete` after proving that the three `@sha256` images (Keycloak, busybox 1.36, OpenMeter) resolve **by digest**. Plain `docker pull/tag/push` would change those digests and the pods would never start — always push with this script.
+Harbor: the project must exist first (`unauthorized`/`project not found` otherwise), and the three digest-pinned images need the project to allow tags that look like `pinned-<digest>` (no tag-immutability rule that blocks them).
+
+**L5. Verify the registry before deploying**
+```
+curl -u "$REGISTRY_USER:$REGISTRY_PASS" https://harbor.etisalat.com/v2/_catalog               # lists repositories (Harbor: use its UI/API per project)
+skopeo inspect --creds "$REGISTRY_USER:$REGISTRY_PASS" docker://$REGISTRY/infinia-technology/ai-gateway-platform/tf-auth:0.17.2-356be61 | head -5
+# from a node: it can really pull
+sudo crictl pull --creds "$REGISTRY_USER:$REGISTRY_PASS" $REGISTRY/redis:7-alpine
+```
+**L6. Deploy** — the same one command; the `images` phase now pushes instead of loading tars:
+```
+airgap/deploy-all.sh dry-run
+airgap/deploy-all.sh all 2>&1 | tee ~/etisalat-deploy.log
+```
+Afterwards every running image must come from the registry: `kubectl get pods -A -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.image}{"\n"}{end}{end}' | sort -u | grep -v "^$REGISTRY/"` (only Kubernetes system images may remain).
+
+**L7. Switching and troubleshooting**
+| Situation | Do |
+|---|---|
+| back to tars | `IMAGE_MODE="tar"`, `REGISTRY="registry.etisalat.local"`, `airgap/deploy-all.sh images render app` (the bundle is the same) |
+| new image version | rebuild the bundle (Part A), copy it, `airgap/deploy-all.sh images render app` (push is repeatable) |
+| pod `ErrImagePull`: `x509: certificate signed by unknown authority` | the node does not trust the registry CA (L2) |
+| pod `ErrImagePull`: `http: server gave HTTP response to HTTPS client` | plain-http registry: `server = "http://…"` + `skip_verify = true` in `hosts.toml` (L2) |
+| pod `ErrImagePull`: `401 Unauthorized` | wrong `REGISTRY_USER/PASS`, or the robot lacks pull on the project; fix and `airgap/deploy-all.sh ns` (re-creates `registry-pull`), then delete the pod |
+| `02-push-registry.sh`: `unauthorized` / `project not found` | create the project (L1) and check the robot has **push** |
+| `02-push-registry.sh`: `INDEX has no path column` | the bundle was built by an older `01`; re-run `airgap/01-bundle-connected.sh` on the Mac (finished tars are skipped) and copy it again |
+| pod `ErrImagePull` on `@sha256` images only | they were pushed by something other than this script; re-run `airgap/deploy-all.sh images` |
+
 ## What was verified in the lab (5 Nov 2026)
 Run on `aks-etisalat-test` (1 node, no internet) exactly as above: all 38 images loaded from tars (`ALL 38 IMAGES PRESENT`), Postgres Patroni leader Running, Keycloak 3/3 with one Infinispan cluster of 3 members, 3× Envoy, all tf-* services Ready, OpenMeter (Kafka 3, API 2, ClickHouse, Redis) Running; `www`, `portal`, `admin` → HTTP 200 through the NGINX ingress, Keycloak issuer `https://auth.etisalat.lab/auth/realms/master`, `api` via Envoy → 401 without a key (correct). Digest-pinned images (`@sha256`) start from the node tars.
 Known gaps: (1) no Etisalat-branded `tf-docs-web` image exists, so the default-brand image is stored under the branded tag (legal pages show default-brand text; docs site stays off, `DOCS_WEB=no`) — ask the developer to run the Etisalat docs build; (2) Postgres runs 1 instance in the lab (`SINGLE_NODE=yes`), HA needs ≥ 3 nodes; (3) MinIO has no public source any more (A7).

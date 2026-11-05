@@ -26,6 +26,7 @@ phase_check(){
   log "check"
   for t in kubectl helm openssl perl python3; do need $t; done   # kubectl+helm come from bundle/tools; the rest are standard on Ubuntu
   [ -f "$KUBECONFIG_FILE" ] || die "KUBECONFIG_FILE=$KUBECONFIG_FILE not found"
+  if [ "${IMAGE_MODE:-tar}" = registry ]; then need skopeo; case "$REGISTRY" in registry.etisalat.local*) die "IMAGE_MODE=registry but REGISTRY is still the placeholder name";; esac; fi
   local bad; bad=$(grep -nE 'REPLACE_' "$ROOT/config.env" | grep -v '^[0-9]*:\s*#' || true)
   [ -z "$bad" ] || die "config.env still has REPLACE_ values:"$'\n'"$bad"
   for v in REGISTRY NAMESPACE DOMAIN TF_TAG BRAND_TAG STORAGE_CLASS SMTP_HOST SMTP_PORT SMTP_USER KEYCLOAK_JAR_URL TLS_CERT TLS_KEY CH_DATA_SIZE CH_LOG_SIZE; do [ -n "${!v:-}" ] || die "config.env: $v is empty"; done
@@ -47,7 +48,10 @@ phase_check(){
 }
 
 phase_push(){ log "push images -> $REGISTRY (only for registry setups)"; ./02-push-registry.sh; }
-phase_images(){ log "load image tars into every node ($NODE_LOAD_MODE)"; ./load-images.sh "$NODE_LOAD_MODE"; }
+phase_images(){
+  if [ "${IMAGE_MODE:-tar}" = registry ]; then log "push image tars -> $REGISTRY (IMAGE_MODE=registry)"; ./02-push-registry.sh
+  else log "load image tars into every node ($NODE_LOAD_MODE)"; ./load-images.sh "$NODE_LOAD_MODE"; fi
+}
 
 phase_prepare(){
   log "prepare (patch hardcoded images, ingress template, vendor subcharts)"
