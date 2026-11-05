@@ -1,45 +1,44 @@
 #!/usr/bin/env bash
-# RUN ON AN INTERNET-CONNECTED HOST. Builds ./bundle/ (images + charts + CRDs + jar) to carry into the air-gap.
-# Run from the package root (ethisalat/). Needs: skopeo, helm >=3.14, curl, tar, envsubst. `docker login` / `skopeo login` to docker.io (rate limit) and ghcr.io (private tf-* images) first.
+# RUN ON THE INTERNET-CONNECTED MAC/LAPTOP, from the package root. Builds ./bundle/ : image TAR files + charts + CRDs + jar + helm.
+# Needs: skopeo, helm, curl, tar, envsubst.  Logins first:  skopeo login docker.io   skopeo login ghcr.io  (ghcr needs a READ token for infinia-technology)
 set -euo pipefail
-cd "$(dirname "$0")/.."                      # = ethisalat/
+cd "$(dirname "$0")/.."
 . airgap/env.sh
-[ -d "$ROOT/images" ] || true
-REPO="${REPO:-$PWD/ai-gateway-platform}"     # checkout used for the deploy (the same commit as TF_TAG)
-mkdir -p "$BUNDLE_DIR"/{images,charts,crds,jars,repo,registry}
-case "$TF_TAG$BRAND_TAG" in *REPLACE*) echo "set TF_TAG/BRAND_TAG in config.env"; exit 1;; esac
-command -v skopeo >/dev/null || { echo "skopeo missing"; exit 1; }
+mkdir -p "$BUNDLE_DIR"/{tars,charts,crds,jars,repo,tools}
+case "$TF_TAG$BRAND_TAG" in *REPLACE*) echo "set TF_TAG and BRAND_TAG in config.env first"; exit 1;; esac
+command -v skopeo >/dev/null || { echo "skopeo missing (brew install skopeo)"; exit 1; }
 
-echo "== images =="
+echo "== images -> tar files (one per image, named $REGISTRY/<path>) =="
+: > "$BUNDLE_DIR/tars/INDEX"
 grep -vE '^\s*(#|$)' airgap/images.txt | envsubst '${TF_TAG} ${BRAND_TAG}' | while IFS='|' read -r src dst mode; do
   src=$(echo $src); dst=$(echo $dst); mode=$(echo $mode)
-  name=$(echo "$dst" | tr '/:@' '___')
-  [ -d "$BUNDLE_DIR/images/$name" ] && { echo "skip  $dst"; continue; }
-  flags="--override-os linux --override-arch ${PLATFORM#linux/}"; [ "$mode" = all ] && flags="--all --preserve-digests"
-  echo "pull  $src"
-  skopeo copy $flags "docker://$src" "oci:$BUNDLE_DIR/images/$name:img"
-  printf '%s|%s|%s\n' "$name" "$dst" "$mode" >> "$BUNDLE_DIR/images/INDEX"
+  name=$(echo "$dst" | tr '/:@' '___'); tar="$BUNDLE_DIR/tars/$name.tar"
+  case "$dst" in *@sha256:*) base="${dst%@*}"; case "${base##*/}" in *:*) base="${base%:*}";; esac; ref="$REGISTRY/$base:pinned-${dst##*:}"; digest="${dst##*:}";; *) ref="$REGISTRY/$dst"; digest="";; esac
+  if [ ! -s "$tar" ]; then
+    flags="--override-os linux --override-arch ${PLATFORM#linux/}"; [ "$mode" = all ] && flags="--all --preserve-digests"
+    echo "pull  $src"
+    rm -f "$tar.part"; skopeo copy $flags "docker://$src" "oci-archive:$tar.part:$ref" && mv "$tar.part" "$tar"
+  else echo "skip  $name (already built)"; fi
+  printf '%s|%s|%s\n' "$name.tar" "$ref" "$digest" >> "$BUNDLE_DIR/tars/INDEX"
 done
-
-echo "== registry:2 (only used if you have no registry: airgap/02a-local-registry.sh) =="
-[ -f "$BUNDLE_DIR/registry/registry2.tar" ] || skopeo copy --override-os linux --override-arch "${PLATFORM#linux/}" docker://docker.io/library/registry:2 docker-archive:"$BUNDLE_DIR/registry/registry2.tar":registry:2
 
 echo "== helm charts =="
 ( cd "$REPO/helm/tokenfactory" && helm dependency build )
-( cd "$REPO/helm/infrastructure/openmeter" && helm dependency build )        # vendors openmeter-1.0.0-beta.231.tgz into charts/
-pullchart(){ # name version  (docker.io OCI)  -- via helm; fall back message if Docker Hub auth fails
-  helm pull "oci://docker.io/envoyproxy/$1" --version "$2" -d "$BUNDLE_DIR/charts"; }
+( cd "$REPO/helm/infrastructure/openmeter" && helm dependency build )
+pullchart(){ tok=$(curl -s "https://auth.docker.io/token?scope=repository:envoyproxy/$1:pull&service=registry.docker.io" | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+  m=$(curl -s -H "Authorization: Bearer $tok" -H "Accept: application/vnd.oci.image.manifest.v1+json" "https://registry-1.docker.io/v2/envoyproxy/$1/manifests/$2")
+  d=$(echo "$m" | python3 -c 'import sys,json;m=json.load(sys.stdin);print([l["digest"] for l in m["layers"] if "chart" in l["mediaType"]][0])')
+  curl -sfL -H "Authorization: Bearer $tok" -o "$BUNDLE_DIR/charts/$1-$2.tgz" "https://registry-1.docker.io/v2/envoyproxy/$1/blobs/$d"; echo "  $1-$2.tgz"; }
 pullchart gateway-helm v1.8.1; pullchart ai-gateway-crds-helm v1.0.0; pullchart ai-gateway-helm v1.0.0
-helm pull oci://ghcr.io/nginx/charts/nginx-ingress --version 1.3.2 -d "$BUNDLE_DIR/charts"     # F5 ingress controller (nginx-ingress-1.3.2.tgz)
-curl -fsSL -o "$BUNDLE_DIR/crds/gateway-api-standard-install-v1.3.0.yaml" \
-  https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.3.0/standard-install.yaml
+tok=$(curl -s "https://ghcr.io/token?scope=repository:nginx/charts/nginx-ingress:pull" | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+m=$(curl -s -H "Authorization: Bearer $tok" -H "Accept: application/vnd.oci.image.manifest.v1+json" https://ghcr.io/v2/nginx/charts/nginx-ingress/manifests/1.3.2)
+d=$(echo "$m" | python3 -c 'import sys,json;m=json.load(sys.stdin);print([l["digest"] for l in m["layers"] if "chart" in l["mediaType"]][0])')
+curl -sfL -H "Authorization: Bearer $tok" -o "$BUNDLE_DIR/charts/nginx-ingress-1.3.2.tgz" "https://ghcr.io/v2/nginx/charts/nginx-ingress/blobs/$d"; echo "  nginx-ingress-1.3.2.tgz"
+curl -fsSL -o "$BUNDLE_DIR/crds/gateway-api-standard-install-v1.3.0.yaml" https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.3.0/standard-install.yaml
 
-echo "== keycloak SPI jar (otherwise fetched from Maven Central at pod start) =="
+echo "== keycloak SPI jar + helm (linux-amd64) =="
 curl -fsSL -o "$BUNDLE_DIR/jars/keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar" \
  https://repo1.maven.org/maven2/io/github/mesutpiskin/keycloak-2fa-email-authenticator/26.5.0-KC26.7.3/keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar
+[ -x "$BUNDLE_DIR/tools/helm" ] || { curl -fsSL https://get.helm.sh/helm-v3.18.6-linux-amd64.tar.gz | tar -xz -C "$BUNDLE_DIR/tools" --strip-components=1 linux-amd64/helm; }
 
-echo "== repo snapshot (chart + setup scripts + brand theme; vendored charts/ included) =="
-COPYFILE_DISABLE=1 tar --exclude=.git -C "$(dirname "$REPO")" -czf "$BUNDLE_DIR/repo/ai-gateway-platform.tgz" "$(basename "$REPO")"
-cp -R zalando values airgap patches config.env "$BUNDLE_DIR/"
-( cd "$BUNDLE_DIR" && find . -type f -not -path './images/*' -print0 | xargs -0 sha256sum > SHA256SUMS && du -sh . )
-echo "DONE -> tar -cf etisalat-bundle.tar -C $(dirname "$BUNDLE_DIR") $(basename "$BUNDLE_DIR") and move it across"
+echo "== done. total size:"; du -sh "$BUNDLE_DIR"

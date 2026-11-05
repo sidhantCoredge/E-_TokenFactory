@@ -2,12 +2,13 @@
 # One-command, resumable, idempotent deploy of the Etisalat air-gapped stack.
 #   ./deploy-all.sh check            preflight only (read-only)
 #   ./deploy-all.sh dry-run          render EVERY chart offline with helm template (no cluster needed) - run this first
-#   ./deploy-all.sh all              push -> check -> prepare -> ns -> pg -> secrets -> controllers -> ingress -> openmeter -> app -> verify
+#   ./deploy-all.sh all              check -> prepare -> render -> ns -> images -> pg -> secrets -> controllers -> ingress -> openmeter -> app -> verify
 #   ./deploy-all.sh <phase> [...]    run specific phases;   ./deploy-all.sh --from <phase>   resume from a phase
-# Phases: push check prepare render ns pg secrets controllers ingress openmeter app verify
+# Phases: check prepare render ns images pg secrets controllers ingress openmeter app verify   (push = optional, only if you DO have a registry)
 set -euo pipefail
 cd "$(dirname "$0")"; . ./env.sh
-PHASES=(push check prepare render ns pg secrets controllers ingress openmeter app verify)
+PHASES=(check prepare render ns images pg secrets controllers ingress openmeter app verify)
+ALLPH=(push "${PHASES[@]}")
 OUT="$ROOT/rendered"; KEYFILE="${KEYFILE:-$HOME/.etisalat-service-keys.env}"
 C="$BUNDLE_DIR/charts"; ZC="$ROOT/zalando/charts"
 log(){ printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
@@ -22,7 +23,8 @@ kc(){ if [ $DRY = 1 ]; then echo "  [dry-run] kubectl $*"; else kubectl "$@"; fi
 
 phase_check(){
   log "check"
-  for t in kubectl helm envsubst openssl perl python3 make; do need $t; done; [ $DRY = 1 ] || need skopeo
+  for t in kubectl helm envsubst openssl perl python3 make; do need $t; done
+  [ -f "$KUBECONFIG_FILE" ] || die "KUBECONFIG_FILE=$KUBECONFIG_FILE not found"
   local bad; bad=$(grep -nE 'REPLACE_' "$ROOT/config.env" | grep -v '^[0-9]*:\s*#' || true)
   [ -z "$bad" ] || die "config.env still has REPLACE_ values:\n$bad"
   for v in REGISTRY NAMESPACE DOMAIN TF_TAG BRAND_TAG STORAGE_CLASS SMTP_HOST SMTP_PORT SMTP_USER KEYCLOAK_JAR_URL TLS_CERT TLS_KEY CH_DATA_SIZE CH_LOG_SIZE; do [ -n "${!v:-}" ] || die "config.env: $v is empty"; done
@@ -33,22 +35,18 @@ phase_check(){
   for f in charts/gateway-helm-v1.8.1.tgz charts/ai-gateway-crds-helm-v1.0.0.tgz charts/ai-gateway-helm-v1.0.0.tgz charts/nginx-ingress-1.3.2.tgz crds/gateway-api-standard-install-v1.3.0.yaml; do [ -f "$BUNDLE_DIR/$f" ] || die "bundle file missing: $f"; done
   if [ $DRY = 0 ]; then
     kubectl version --request-timeout=10s >/dev/null 2>&1 || die "kubectl cannot reach the cluster"
-    local n; n=$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready' || true); echo "  ready nodes: $n"; [ "$n" -ge 3 ] || die "need >=3 Ready nodes (pgdb has 3 instances with anti-affinity)"
-    kubectl get sc "$STORAGE_CLASS" >/dev/null 2>&1 || die "StorageClass '$STORAGE_CLASS' not found"
-    [ "$(kubectl get sc "$STORAGE_CLASS" -o jsonpath='{.allowVolumeExpansion}')" = "true" ] || echo "  WARNING: StorageClass $STORAGE_CLASS has allowVolumeExpansion!=true (Redis/Postgres cannot be grown later)"
+    local n; n=$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready' || true); echo "  ready nodes: $n"
+    if [ "${SINGLE_NODE:-no}" = yes ]; then echo "  SINGLE_NODE=yes (lab): Postgres will run 1 instance"; else [ "$n" -ge 3 ] || die "need >=3 Ready nodes (pgdb has 3 instances with anti-affinity); for a 1-node lab set SINGLE_NODE=yes"; fi
+    kubectl get sc "$STORAGE_CLASS" >/dev/null 2>&1 || die "StorageClass '$STORAGE_CLASS' not found (kubectl get sc)"
+    [ "$(kubectl get sc "$STORAGE_CLASS" -o jsonpath='{.allowVolumeExpansion}')" = "true" ] || echo "  WARNING: StorageClass $STORAGE_CLASS has allowVolumeExpansion!=true"
     if [ "$PG_OPERATOR_MODE" = existing ]; then kubectl get crd postgresqls.acid.zalan.do >/dev/null 2>&1 || die "PG_OPERATOR_MODE=existing but no postgresqls.acid.zalan.do CRD"; fi
-    echo "  checking images in $REGISTRY ..."
-    local miss=0
-    while IFS='|' read -r src dst mode; do
-      dst=$(echo $dst); ref="$REGISTRY/$dst"; case "$dst" in *@sha256:*) ;; *) ;; esac
-      skopeo inspect --tls-verify="${DEST_TLS_VERIFY}" ${REGISTRY_USER:+--creds "$REGISTRY_USER:$REGISTRY_PASS"} --raw "docker://$ref" >/dev/null 2>&1 || { case "$dst" in *@sha256:*) ;; *) echo "  MISSING $ref"; miss=1;; esac; }
-    done < <(grep -vE '^\s*(#|$)' "$ROOT/airgap/images.txt" | envsubst '${TF_TAG} ${BRAND_TAG}')
-    [ $miss = 0 ] || die "images missing in the registry - run: airgap/deploy-all.sh push"
+    [ -s "$BUNDLE_DIR/tars/INDEX" ] || die "image tars missing: $BUNDLE_DIR/tars (copy the bundle)"
   fi
   echo "  check passed"
 }
 
-phase_push(){ log "push images -> $REGISTRY"; ./02-push-registry.sh; }
+phase_push(){ log "push images -> $REGISTRY (only for registry setups)"; ./02-push-registry.sh; }
+phase_images(){ log "load image tars into every node ($NODE_LOAD_MODE)"; ./load-images.sh "$NODE_LOAD_MODE"; }
 
 phase_prepare(){
   log "prepare (patch hardcoded images, ingress template, vendor subcharts)"
@@ -65,7 +63,10 @@ phase_render(){
   for n in umbrella openmeter nginx-ingress envoy-gateway ai-gateway; do
     envsubst "$VARS" < "$ROOT/values/$n.values.yaml.tmpl" > "$OUT/$n.yaml"
     ! grep -q '\${' "$OUT/$n.yaml" || die "unreplaced \${VAR} in $OUT/$n.yaml: $(grep -n '\${' "$OUT/$n.yaml" | head -2)"
-  done; echo "  rendered 5 files (no secrets inside)"
+  done
+  if [ "${LB_INTERNAL:-no}" = yes ]; then cp "$ROOT/values/lb-internal.umbrella.yaml" "$OUT/lb-umbrella.yaml"; cp "$ROOT/values/lb-internal.nginx.yaml" "$OUT/lb-nginx.yaml"
+  else cp "$ROOT/values/lb-none.yaml" "$OUT/lb-umbrella.yaml"; cp "$ROOT/values/lb-none.yaml" "$OUT/lb-nginx.yaml"; fi
+  echo "  rendered values (no secrets inside); LB_INTERNAL=${LB_INTERNAL:-no}"
 }
 
 phase_ns(){
@@ -88,10 +89,11 @@ phase_pg(){
     [ $DRY = 1 ] || wait_for "postgres-operator Available" 180 kubectl -n postgres rollout status deploy/postgres-operator --timeout=10s
     [ $DRY = 1 ] || wait_for "CRD postgresqls.acid.zalan.do" 120 kubectl get crd postgresqls.acid.zalan.do
   fi
-  helm upgrade --install pgdb "$ZC/pgdb" -n "$NAMESPACE" --set registry="$REGISTRY" --set volume.storageClass="$STORAGE_CLASS"
+  local INST=3; [ "${SINGLE_NODE:-no}" = yes ] && INST=1
+  helm upgrade --install pgdb "$ZC/pgdb" -n "$NAMESPACE" --set registry="$REGISTRY" --set volume.storageClass="$STORAGE_CLASS" --set numberOfInstances=$INST
   [ $DRY = 1 ] && return 0
   wait_for "pgdb status Running" 900 bash -c "[ \"\$(kubectl -n $NAMESPACE get postgresql pgdb -o jsonpath='{.status.PostgresClusterStatus}')\" = Running ]"
-  wait_for "3 pgdb pods Ready" 600 bash -c "[ \"\$(kubectl -n $NAMESPACE get pods -l cluster-name=pgdb,application=spilo --no-headers | grep -c ' 2/2\\| 1/1')\" -ge 3 ]"
+  wait_for "$INST pgdb pods Ready" 600 bash -c "[ \"\$(kubectl -n $NAMESPACE get pods -l cluster-name=pgdb,application=spilo --no-headers | grep -c ' 2/2\\| 1/1')\" -ge $INST ]"
   wait_for "5 role secrets" 300 bash -c "[ \"\$(kubectl -n $NAMESPACE get secret --no-headers | grep -c 'pgdb.credentials.postgresql.acid.zalan.do')\" -ge 5 ]"
   kubectl -n "$NAMESPACE" exec pgdb-0 -c postgres -- patronictl list || true
 }
@@ -129,7 +131,7 @@ phase_controllers(){
 
 phase_ingress(){
   log "F5 NGINX Ingress Controller 3.6.2"
-  helm upgrade --install nginx-ingress "$C/nginx-ingress-1.3.2.tgz" -n nginx-ingress -f "$OUT/nginx-ingress.yaml" --wait --timeout 10m
+  helm upgrade --install nginx-ingress "$C/nginx-ingress-1.3.2.tgz" -n nginx-ingress -f "$OUT/nginx-ingress.yaml" -f "$OUT/lb-nginx.yaml" --wait --timeout 10m
   [ $DRY = 1 ] || kubectl get ingressclass nginx
 }
 
@@ -157,7 +159,7 @@ phase_app(){
   . "$KEYFILE"
   export OM_CHECK_IMAGE="$REGISTRY/busybox:1.36"        # preflight's one-shot OpenMeter probe pod
   make -C "$REPO/helm/setup" install-app NAMESPACE="$NAMESPACE" VALUES=helm/tokenfactory/values-tf-etisalat.yaml \
-    HELM_ARGS="-f $OUT/umbrella.yaml --timeout 30m --set global.secrets.serviceKeyTfAccounts=$SERVICE_KEY_TF_ACCOUNTS --set global.secrets.serviceKeyTfLedger=$SERVICE_KEY_TF_LEDGER --set global.secrets.serviceKeyTfControl=$SERVICE_KEY_TF_CONTROL --set global.secrets.serviceKeyTfRelay=$SERVICE_KEY_TF_RELAY --set global.secrets.serviceKeyTfWarden=$SERVICE_KEY_TF_WARDEN"
+    HELM_ARGS="-f $OUT/umbrella.yaml -f $OUT/lb-umbrella.yaml --timeout 30m --set global.secrets.serviceKeyTfAccounts=$SERVICE_KEY_TF_ACCOUNTS --set global.secrets.serviceKeyTfLedger=$SERVICE_KEY_TF_LEDGER --set global.secrets.serviceKeyTfControl=$SERVICE_KEY_TF_CONTROL --set global.secrets.serviceKeyTfRelay=$SERVICE_KEY_TF_RELAY --set global.secrets.serviceKeyTfWarden=$SERVICE_KEY_TF_WARDEN"
 }
 
 phase_verify(){
@@ -184,9 +186,9 @@ phase_dryrun(){
   T pgdb "$ZC/pgdb" -n "$NAMESPACE" --set registry="$REGISTRY" --set volume.storageClass="$STORAGE_CLASS"
   T eg "$C/gateway-helm-v1.8.1.tgz" -n envoy-gateway-system -f "$REPO/helm/setup/scripts/envoygateway-config.yaml" -f "$OUT/envoy-gateway.yaml" --set config.envoyGateway.provider.kubernetes.deploy.type=GatewayNamespace
   T aieg "$C/ai-gateway-helm-v1.0.0.tgz" -n envoy-ai-gateway-system -f "$OUT/ai-gateway.yaml"
-  T nginx-ingress "$C/nginx-ingress-1.3.2.tgz" -n nginx-ingress -f "$OUT/nginx-ingress.yaml"
+  T nginx-ingress "$C/nginx-ingress-1.3.2.tgz" -n nginx-ingress -f "$OUT/nginx-ingress.yaml" -f "$OUT/lb-nginx.yaml"
   T openmeter "$REPO/helm/infrastructure/openmeter" -n openmeter -f "$OUT/openmeter.yaml" --set openmeter.clickhouseCredentials.existingSecretName=om-clickhouse-pw --set openmeter.config.postgres.url=x --set openmeter.svix.database.dsn=x
-  T tokenfactory "$REPO/helm/tokenfactory" -n "$NAMESPACE" -f "$REPO/helm/tokenfactory/values-tf-etisalat.yaml" -f "$OUT/umbrella.yaml" \
+  T tokenfactory "$REPO/helm/tokenfactory" -n "$NAMESPACE" -f "$REPO/helm/tokenfactory/values-tf-etisalat.yaml" -f "$OUT/umbrella.yaml" -f "$OUT/lb-umbrella.yaml" \
     --set global.secrets.serviceKeyTfAccounts=x --set global.secrets.serviceKeyTfLedger=x --set global.secrets.serviceKeyTfControl=x --set global.secrets.serviceKeyTfRelay=x --set global.secrets.serviceKeyTfWarden=x \
     --set-file keycloak.theme.archive="$REPO/brands/etisalat/keycloak/theme.tar.gz.b64"
   log "dry-run PASSED - safe to run: ./deploy-all.sh all"
@@ -200,8 +202,7 @@ case "$1" in
   *) run=("$@");;
 esac
 for p in "${run[@]}"; do
-  case " ${PHASES[*]} " in *" $p "*) ;; *) die "unknown phase: $p";; esac
-  [ "$p" = push ] && [ "$1" = all ] && [ "${PUSH_IMAGES:-yes}" = no ] && continue
+  case " ${ALLPH[*]} " in *" $p "*) ;; *) die "unknown phase: $p";; esac
   "phase_$p"
 done
 log "done: ${run[*]}"

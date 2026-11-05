@@ -1,0 +1,5 @@
+# Added only when LB_INTERNAL=yes (Azure): the ingress LoadBalancer gets a private IP.
+controller:
+  service:
+    annotations:
+      service.beta.kubernetes.io/azure-load-balancer-internal: "true"

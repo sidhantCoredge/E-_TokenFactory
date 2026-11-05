@@ -1,0 +1,9 @@
+# Added only when LB_INTERNAL=yes (Azure): the Envoy LoadBalancer gets a private IP, nothing is published to the Internet.
+tf-gateway-resources:
+  envoyProxy:
+    spec:
+      provider:
+        kubernetes:
+          envoyService:
+            annotations:
+              service.beta.kubernetes.io/azure-load-balancer-internal: "true"
