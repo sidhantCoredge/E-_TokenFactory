@@ -221,6 +221,76 @@ Delete the cluster: `terraform destroy` with the `-target` list written at the t
 | 15 | Postgres `pg_hba` allows `0.0.0.0/0 md5` (copied from prod) | tighten to the pod CIDR for production |
 | 16 | No Postgres backup inside an air-gap | not configured — plan `pg_dump`/WAL-G to an internal object store before production |
 
+## PART I — The developer's `values-tf-etisalat.yaml`: where each `TODO(owner)` is filled in this package
+`ai-gateway-platform/helm/tokenfactory/values-tf-etisalat.yaml` (identical to `develop`, checked 5 Nov) stays untouched. It is layer 1; our files are layer 2. Order Helm applies: chart `values.yaml` → `values-tf-etisalat.yaml` → `rendered/umbrella.yaml` → `rendered/lb-umbrella.yaml` → `rendered/service-keys.yaml`.
+
+| `TODO(owner)` in the developer's file | Filled here by |
+|---|---|
+| `brandImages` (placeholder `0.17.0-etisalat-0000000`) | `config.env` → `BRAND_TAG` |
+| `global.image.tag` (empty on purpose) | `config.env` → `TF_TAG` |
+| `global.urls.*` (`etisalat.example.com`) | `config.env` → `DOMAIN` (creates `api. auth. portal. admin. www.`) |
+| `supportEmail`, `platformAdminEmail`, SMTP host/port/user | `config.env` → `SUPPORT_EMAIL`, `PLATFORM_ADMIN_EMAIL`, `SMTP_HOST/PORT/USER/PASSWORD` |
+| `stripePublishableKey` (empty) | leave empty — `billing.topup` is off in this brand |
+| Persona CDD | not in the chart on `develop` yet — nothing to set |
+| datastores ("inherited: external") | set **explicitly** in `umbrella.values.yaml.tmpl` (`global.postgres`, `keycloak.postgres`, `openfga.postgres` → Zalando `pgdb`) |
+| replicas / PDB / sizing | `umbrella.values.yaml.tmpl` (3 replicas, Keycloak HA, Envoy PDB) |
+| `OPENMETER_URL` namespace | default `openmeter` is kept (our OpenMeter release uses it) |
+| `tf-gateway-resources.tls` (wildcard + `tf-etisalat-tls`) + Envoy Service | `config.env` → `DOMAIN`, `TLS_CERT`, `TLS_KEY`; `LB_INTERNAL` for Azure |
+| `storageClass` | `config.env` → `STORAGE_CLASS` |
+| Ingress (not in the developer's file) | `umbrella.values.yaml.tmpl` → `ingress:` — see Part J |
+
+**What comes unchanged from the developer's Etisalat overlay (we do not touch it):** the whole `brandPack` (Etisalat theme, copy, colours, feature ceiling: sign-up on, social login and top-up off), `keycloakSecrets.generate: true`, `secrets.existingSecret: tokenfactory-secrets`, Keycloak in-cluster TLS (`keycloak-tls`, `keycloak-ca`, HTTPS upstreams of the portal/admin pods), the complete `tf-ledger.env` list (OpenMeter URL, freshness, replay horizon), `tf-warden`/`tf-relay`/`tf-shim` sizing, Redis 10Gi/3gb, and the `tf-gateway-resources` TLS + Envoy LoadBalancer port patch.
+**What this package adds on top (layer 2):** the **Ingress** (portal/admin/www/auth), **Keycloak HA** (3 replicas, Infinispan, PDB, anti-affinity), **Postgres** (Zalando `pgdb`, explicit external blocks for the app, Keycloak and OpenFGA), registry prefix / image tags, URLs from `DOMAIN`, SMTP, replicas and resources of every service, Envoy replicas + PDB, GeoIP off, and the lab flags.
+The Ingress is the Xailon chart change (PR #678, `ingress.yaml` + `ingress:` values) that is **not merged into `develop` yet**; the developer's file therefore says "no Ingress objects". `patches/0001-…` carries it (the chart copy used here already contains it). Once #678 is merged just delete the patch step; the `ingress:` block in our values stays exactly as it is.
+`develop` is already 18 commits ahead (0.17.3 preparation, new validators such as `validate-sso-proof`, `validate-control-plaintext`). This package is pinned to 0.17.2 on purpose (it is what was tested). To move to 0.17.3: update the chart checkout, `TF_TAG`/`BRAND_TAG`, rebuild the bundle, run `dry-run`, and expect to fix whatever the new validators ask for.
+
+## PART J — Changing a value later (any value, including the Ingress)
+**The loop is always the same:** edit → `dry-run` → apply → check.
+```
+nano ~/etisalat/config.env                       # site values (domain, tag, SMTP, cert, …)    OR
+nano ~/etisalat/values/umbrella.values.yaml.tmpl # anything else for the app (ingress, replicas, resources, Keycloak, Envoy, …)
+cd ~/etisalat
+airgap/deploy-all.sh dry-run                     # must end with "dry-run PASSED"
+airgap/deploy-all.sh render app                  # applies the app change (helm upgrade)
+kubectl -n tokenfactory-etisalat get pods        # check
+helm -n tokenfactory-etisalat history tokenfactory      # every change is a revision; undo with: helm -n tokenfactory-etisalat rollback tokenfactory <revision>
+```
+Which phase applies which file:
+| You changed | Run |
+|---|---|
+| `config.env` (domain, SMTP, tag, cert) or `umbrella.values.yaml.tmpl` | `airgap/deploy-all.sh render ns app` (`ns` re-applies the TLS secret) |
+| `zalando/charts/pgdb/values.yaml` | `airgap/deploy-all.sh pg` |
+| `values/openmeter.values.yaml.tmpl` | `airgap/deploy-all.sh render openmeter` |
+| `values/nginx-ingress.values.yaml.tmpl` (controller replicas/CPU/class) | `airgap/deploy-all.sh render ingress` |
+| `values/envoy-gateway…` / `ai-gateway…` | `airgap/deploy-all.sh render controllers` |
+
+### J1. The Ingress (`ingress:` block in `values/umbrella.values.yaml.tmpl`)
+The block has four parts: `className`, `annotations`, `tls`, `hosts`. Rules that avoid every Ingress mistake: **a host name must be identical in 5 places** — `ingress.hosts[].host`, `ingress.tls[].hosts`, `global.urls.*`, the certificate's SAN, and DNS. If you only change `DOMAIN` in `config.env` the first three move together automatically.
+
+| Task | Edit |
+|---|---|
+| Change the domain (all hosts) | `config.env` → `DOMAIN`; new cert in `TLS_CERT/TLS_KEY`; then `render ns app`; then update DNS |
+| Change ONE host name (e.g. portal on `tokenfactory.etisalat.com`) | in the template change **all three**: `global.urls.portal`, the `portal.` line under `ingress.hosts`, and the same name under `ingress.tls[0].hosts`; the cert must cover it; DNS too |
+| Add another host | add `- { host: "docs.${DOMAIN}", service: tf-site-web, port: 80 }` under `ingress.hosts` **and** the name under `ingress.tls[0].hosts` |
+| Bigger uploads / longer timeouts | `annotations`: `nginx.org/client-max-body-size: 256m`, `nginx.org/proxy-read-timeout: 900s` (units as shown) |
+| Send `auth.` straight to Keycloak | `ingress.hosts` line for `auth.`: `service: keycloak` instead of `keycloak-edge` (edge = nginx in the portal pods that turns a Keycloak 502/504 into the "sign-in unavailable" page) |
+| Different ingress controller | change `className`; the `nginx.org/*` annotations only work with the F5 controller — community ingress-nginx needs its own `nginx.ingress.kubernetes.io/*` equivalents (`proxy-body-size`, `proxy-buffer-size`, `proxy-read-timeout`) |
+| Etisalat has its own ingress/LB | `ingress.enabled: false`, and route the 4 hosts yourself to Services `tf-portal-web:80`, `tf-admin-web:80`, `tf-site-web:80`, `keycloak-edge:80` (or `keycloak:80`) |
+| Replace the TLS certificate | `kubectl -n tokenfactory-etisalat create secret tls tf-etisalat-tls --cert=new.crt --key=new.key --dry-run=client -o yaml \| kubectl apply -f -` (or set `TLS_CERT/TLS_KEY` and run `deploy-all.sh ns`); the controller and Envoy reload it by themselves, no pod restart |
+After any Ingress edit: `kubectl -n tokenfactory-etisalat get ingress tokenfactory -o yaml` (hosts, tls, annotations), then `curl -sk --resolve portal.<domain>:443:<ingress-ip> https://portal.<domain>/ -o /dev/null -w '%{http_code}\n'`. If a host answers with nginx's own self-signed certificate, the TLS secret name or the host in `tls.hosts` does not match.
+
+### J2. Other common changes
+| Change | Where / how |
+|---|---|
+| SMTP relay (or its SSL mode) | `config.env` `SMTP_*`; SSL/STARTTLS: add under `tf-auth.config.keycloak.smtp` in the template `ssl: true` / `starttls: false` (prod used port 465 + ssl) |
+| SMTP password / Stripe or Google keys later | they live in Secret `tokenfactory-secrets`: `kubectl -n tokenfactory-etisalat patch secret tokenfactory-secrets -p '{"stringData":{"smtp-password":"NEW"}}'` then `kubectl -n tokenfactory-etisalat rollout restart deploy/tf-auth deploy/tf-accounts` and `rollout restart sts/keycloak` (the chart cannot detect a change inside an existing Secret) |
+| Replicas / CPU / RAM of a service | template: `tf-relay: { replicas: 3, resources: … }` etc. (Part D lists every block) |
+| Keycloak replicas, RAM, heap | template `keycloak:` — keep `-Xmx` at ½–¾ of `limits.memory` |
+| New image version | rebuild bundle with new `TF_TAG` (Part A), copy, then `airgap/deploy-all.sh images render app` |
+| Envoy replicas / limits | template `tf-gateway-resources.envoyProxy…envoyDeployment` |
+| Postgres size / instances / parameters | `zalando/charts/pgdb/values.yaml`, then `deploy-all.sh pg` (disk can only grow) |
+| A value that has no key in the template yet | add the key exactly as it appears in the chart's `values.yaml` (see `ai-gateway-platform/helm/tokenfactory/values-tf-prod.yaml` for every available key and its comment); lists such as `tf-ledger.env` are **replaced wholesale** — copy the whole list from `values-tf-etisalat.yaml` and change the one entry |
+
 ## What was verified in the lab (5 Nov 2026)
 Run on `aks-etisalat-test` (1 node, no internet) exactly as above: all 38 images loaded from tars (`ALL 38 IMAGES PRESENT`), Postgres Patroni leader Running, Keycloak 3/3 with one Infinispan cluster of 3 members, 3× Envoy, all tf-* services Ready, OpenMeter (Kafka 3, API 2, ClickHouse, Redis) Running; `www`, `portal`, `admin` → HTTP 200 through the NGINX ingress, Keycloak issuer `https://auth.etisalat.lab/auth/realms/master`, `api` via Envoy → 401 without a key (correct). Digest-pinned images (`@sha256`) start from the node tars.
 Known gaps: (1) no Etisalat-branded `tf-docs-web` image exists, so the default-brand image is stored under the branded tag (legal pages show default-brand text; docs site stays off, `DOCS_WEB=no`) — ask the developer to run the Etisalat docs build; (2) Postgres runs 1 instance in the lab (`SINGLE_NODE=yes`), HA needs ≥ 3 nodes; (3) MinIO has no public source any more (A7).
