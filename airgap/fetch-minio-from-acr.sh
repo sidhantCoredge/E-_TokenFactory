@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # MinIO removed its public images (Docker Hub / quay.io answer "access denied"), so this one tar must come from a registry
-# that still holds it. Run on a host that can reach it (the jumphost reaches ACR `acrtokenfactory`, which has the image).
+# that still holds it. Run on a host that can reach it (the install VM reaches ACR `acrtokenfactory`, which has the image).
 # Needs: az (logged in), python3. Writes bundle/tars/minio_minio_RELEASE.2025-09-07T16-13-09Z.tar (OCI archive, amd64).
 set -euo pipefail
 cd "$(dirname "$0")"; . ./env.sh

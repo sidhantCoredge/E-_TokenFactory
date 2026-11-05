@@ -1,12 +1,12 @@
 # TokenFactory – Etisalat air-gap deployment (ONE document, follow top to bottom)
 
 No internet and **no registry** inside the air-gap: every image is a `.tar` file that gets loaded straight into each node.
-Three places are involved. Every step below says where to run it:
+Three places are involved (in the lab, `[VM]` = the Azure jumphost). Every step below says where to run it:
 
 | Tag | Where |
 |---|---|
 | **[MAC]** | your laptop WITH internet (builds the bundle) |
-| **[JUMPHOST]** | `azureuser@10.40.1.4` = the air-gap side; it can reach the cluster |
+| **[VM]** | the dedicated Etisalat **install VM** inside the air-gap (there is no jumphost). It must reach the cluster API and the nodes. *Lab only: this role is played by the Azure jumphost `azureuser@10.40.1.4`* |
 | **[CLUSTER]** | the AKS lab `aks-etisalat-test` (real Etisalat: their cluster) |
 
 What gets installed (HA): Postgres (Zalando, 3 instances) for TokenFactory + Keycloak + OpenFGA + OpenMeter · Keycloak (3 replicas) · NGINX Ingress (portal/admin/www/auth) · Envoy AI Gateway (api) · OpenMeter · all tf-* services.
@@ -16,7 +16,7 @@ Lab note: a 1-node cluster cannot hold 3 Postgres instances, so the lab uses `SI
 ## STEP 0 — Things you need before starting
 1. A **GitHub token (PAT) with `read:packages`** that can read `ghcr.io/infinia-technology/*` (the tf-* images are private). The token saved on your Mac is invalid.
 2. Two image tags: `TF_TAG` (release `0.17.2` = `0.17.2-356be61`) and `BRAND_TAG` (the **Etisalat-branded** web images, looks like `0.17.2-etisalat-abc1234`; it MUST end in a 7-character git sha). Step A3 finds them. *If no `-etisalat-` tag exists, the images were never built — ask the developer to run the Etisalat brand build first; nothing can be deployed without them.*
-3. Lab only: the cluster exists (`~/etisalat.kubeconfig` on the jumphost works: `kubectl --kubeconfig ~/etisalat.kubeconfig get nodes` shows 1 Ready node).
+3. Lab only: the cluster exists (`~/etisalat.kubeconfig` on the install VM works: `kubectl --kubeconfig ~/etisalat.kubeconfig get nodes` shows 1 Ready node).
 
 ---
 ## PART A — [MAC] build the bundle (needs internet)
@@ -48,25 +48,28 @@ airgap/01-bundle-connected.sh
 It ends with `== done. total size:` and `image tars: 37 of 38`. **The one missing tar is MinIO** — its public images were removed from Docker Hub and quay.io (that is why the script prints one `FAILED images` entry). It is created in step A7. Anything else listed as FAILED is a real error: fix it and re-run A5 (finished images are skipped).
 Result: `bundle/tars/*.tar`, `bundle/charts`, `bundle/crds`, `bundle/jars`, `bundle/tools/helm` and `bundle/tools/kubectl` (Linux binaries for the air-gap side).
 
-**A6. Copy everything to the jumphost** (resumable). First time as written; when you copy again later add `--exclude config.env` so your filled-in file on the jumphost is not overwritten
+**A6. Copy everything to the install VM** (resumable). First time as written; when you copy again later add `--exclude config.env` so your filled-in file on the VM is not overwritten
 ```
-rsync -avP --exclude .git --exclude E-_TokenFactory -e "ssh -i ~/.ssh/id_rsa_jumphost" ~/Downloads/ethisalat/ azureuser@10.40.1.4:~/etisalat/
+rsync -avP --exclude .git --exclude E-_TokenFactory ~/Downloads/ethisalat/ <vm-user>@<VM-IP>:~/etisalat/
+# lab: rsync -avP --exclude .git --exclude E-_TokenFactory -e "ssh -i ~/.ssh/id_rsa_jumphost" ~/Downloads/ethisalat/ azureuser@10.40.1.4:~/etisalat/
+# no network path Mac -> VM (real air-gap)? copy the folder on a USB disk / approved transfer, then `tar -xf` it as ~/etisalat on the VM
 ```
-**A7. [JUMPHOST] Create the MinIO tar** (the only image the Mac cannot fetch). The jumphost can reach the ACR `acrtokenfactory` that still holds it; the script talks to the ACR REST API, no docker/skopeo needed:
+**A7. [VM] Create the MinIO tar** (the only image the Mac cannot fetch). The VM can reach the ACR `acrtokenfactory` that still holds it; the script talks to the ACR REST API, no docker/skopeo needed:
 ```
-ssh -i ~/.ssh/id_rsa_jumphost azureuser@10.40.1.4
+ssh <vm-user>@<VM-IP>          # lab: ssh -i ~/.ssh/id_rsa_jumphost azureuser@10.40.1.4
 cd ~/etisalat && airgap/fetch-minio-from-acr.sh      # ends with: wrote .../minio_minio_RELEASE.2025-09-07T16-13-09Z.tar
 ls bundle/tars/*.tar | wc -l                          # must print 38
 ```
 (Real Etisalat: they have no ACR — run this on any host that can reach a registry holding `minio/minio:RELEASE.2025-09-07T16-13-09Z` (edit `MINIO_ACR`), or `docker save` the image on a connected host, and drop the file at that path with the image name `registry.etisalat.local/minio/minio:RELEASE.2025-09-07T16-13-09Z`.)
 
 ---
-## PART B — [JUMPHOST] deploy
+## PART B — [VM] deploy
 
 **B1. Log in**
 ```
-ssh -i ~/.ssh/id_rsa_jumphost azureuser@10.40.1.4
+ssh <vm-user>@<VM-IP>          # lab: ssh -i ~/.ssh/id_rsa_jumphost azureuser@10.40.1.4
 cd ~/etisalat
+export VM_IP=<this VM's IP as the cluster nodes see it>      # lab: 10.40.1.4
 ```
 **B2. Check prerequisites.** Nothing has to be installed on this machine: `kubectl` and `helm` come inside the bundle (`bundle/tools/`, the scripts put them on PATH automatically). The only other things needed are standard on every Ubuntu/RHEL server: `bash perl python3 openssl tar`. Verify:
 ```
@@ -75,7 +78,7 @@ for t in perl python3 openssl tar; do command -v $t >/dev/null && echo "ok $t" |
 ls ai-gateway-platform/helm/tokenfactory/templates/ingress.yaml bundle/tars/INDEX bundle/tools/helm bundle/tools/kubectl
 ```
 If a tool really is missing on a brand-new VM, install it from the OS media/package mirror of that VM (only `perl`/`python3`/`openssl` are ever needed). `make`, `envsubst` and `skopeo` are NOT needed in the air-gap.
-(If the kubeconfig is missing: `az aks get-credentials -g rg-tokenfactory -n aks-etisalat-test --admin --file ~/etisalat.kubeconfig`.)
+(Lab only, if the kubeconfig is missing: `az aks get-credentials -g rg-tokenfactory -n aks-etisalat-test --admin --file ~/etisalat.kubeconfig`.)
 
 **B3. TLS certificate.** Lab: make a self-signed wildcard. Real Etisalat: use their cert and key files instead.
 ```
@@ -85,7 +88,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 30 -keyout ~/wild.key -out ~/wil
 ```
 cd ~/etisalat/bundle/jars && (setsid nohup python3 -m http.server 8001 >/tmp/jar.log 2>&1 < /dev/null &)
 cd ~/etisalat
-curl -sI http://10.40.1.4:8001/keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar | head -1      # must print: HTTP/1.0 200 OK
+curl -sI http://$VM_IP:8001/keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar | head -1      # must print: HTTP/1.0 200 OK
 ```
 **B5. Edit `config.env`** (`nano config.env`). Set exactly these lines (everything else stays):
 ```
@@ -98,7 +101,7 @@ export TLS_CERT="/home/azureuser/wild.crt"
 export TLS_KEY="/home/azureuser/wild.key"
 export SMTP_HOST="smtp.etisalat.lab"          # lab: any name; mails will simply not be delivered
 export SMTP_USER="lab"
-export KEYCLOAK_JAR_URL="http://10.40.1.4:8001/keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar"
+export KEYCLOAK_JAR_URL="http://<VM-IP>:8001/keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar"     # lab: 10.40.1.4  (the pods must be able to reach this address)
 ```
 `TF_TAG` / `BRAND_TAG` are already filled (copied from the Mac). Nothing may still say `REPLACE_`:
 ```
@@ -143,13 +146,32 @@ kubectl -n tokenfactory-etisalat get sts keycloak             # READY 3/3
 kubectl -n tokenfactory-etisalat get ingress tokenfactory
 ```
 
+**B10. Etisalat brand + feature gate** (the verification the developer's overlay asks for). The scripts are in the repo copy; they need `curl` and `python3`, and they read the release `tokenfactory` in namespace `tokenfactory-etisalat`. The lab has no DNS, so first map the names on this VM (real Etisalat: DNS exists, skip these two lines):
+```
+echo "<INGRESS_IP> portal.etisalat.lab admin.etisalat.lab www.etisalat.lab auth.etisalat.lab" | sudo tee -a /etc/hosts      # lab: 10.40.16.7
+echo "<ENVOY_IP>   api.etisalat.lab" | sudo tee -a /etc/hosts                                                             # lab: 10.40.16.8
+```
+then (replace `<domain>` by your `DOMAIN`):
+```
+export KUBECONFIG=~/etisalat.kubeconfig; export PATH=~/etisalat/bundle/tools:$PATH
+cd ~/etisalat/ai-gateway-platform/test/e2e
+KC=kubectl NS=tokenfactory-etisalat PORTAL_URL=https://portal.<domain> ADMIN_URL=https://admin.<domain> \
+  SITE_URL=https://www.<domain> DOCS_URL=https://www.<domain>/docs \
+  EXPECT_PRODUCT='Token Factory by etisalat' EXPECT_FAVICON=favicon.png \
+  EXPECT_THEME_POLICY=both EXPECT_DARK_TOKENS=yes EXPECT_SIGNUP=yes ./branding.sh
+KC=kubectl NS=tokenfactory-etisalat PORTAL_URL=https://portal.<domain> SITE_URL=https://www.<domain> ./features.sh
+```
+Expected: `branding.sh` passes (brand `etisalat`, product `Token Factory by etisalat`, Etisalat Keycloak theme, light+dark). `features.sh` must show **`auth.socialLogin` and `billing.topup` OFF** (HTTP 404 `feature_disabled`) and **`auth.signup` ON** — that is the Etisalat feature ceiling from the brand package, not a bug. With the lab's self-signed certificate the scripts' `curl` needs `-k`; if a check fails only for that reason, note it and move on. In the lab the `docs` check fails by design (`DOCS_WEB=no`, no Etisalat docs image).
+
 ---
 ## PART C — Real Etisalat (instead of the lab)
 Same steps, only these differences:
-* B3: use the real wildcard certificate; B5: `SINGLE_NODE="no"`, `LB_INTERNAL="no"`, real `DOMAIN`, `SMTP_*`, `STORAGE_CLASS`, a jar URL on an internal web server (not your jumphost).
+* B3: use the real wildcard certificate; B5: `SINGLE_NODE="no"`, `LB_INTERNAL="no"`, real `DOMAIN`, `SMTP_*`, `STORAGE_CLASS`, a jar URL on an internal web server (or the install VM itself, as in B4).
 * Loading images: nodes usually have SSH, so set in `config.env`:
   `export NODE_LOAD_MODE="ssh"` and `export NODES="user@node1 user@node2 user@node3"` (passwordless sudo on each node). Or `pod` mode if SSH is not allowed.
-* Etisalat has no ACR: do A7 with `docker save` of MinIO from any host that has the image, and ask the developer for the Etisalat-branded `tf-docs-web` build (then set `DOCS_WEB=yes` and change its line in `airgap/images.txt` to `${BRAND_TAG}`).
+* Etisalat has no ACR (and no jumphost): do A7 with `docker save` of MinIO from any host that has the image, and ask the developer for the Etisalat-branded `tf-docs-web` build (then set `DOCS_WEB=yes` and change its line in `airgap/images.txt` to `${BRAND_TAG}`).
+* TLS for `api.` — the developer's overlay offers two options: **(a) terminate at the Envoy Gateway** (what this package does: wildcard secret `tf-etisalat-tls`, listener 8443 published on 443) or **(b) terminate at an external load balancer / CDN**: add `tf-gateway-resources: { tls: { enabled: false } }` to `values/umbrella.values.yaml.tmpl` (Envoy then serves plain HTTP on 8080 only) and skip `TLS_CERT/TLS_KEY` for the gateway. The web hosts (portal/admin/www/auth) are always terminated by the NGINX ingress with the same wildcard secret.
+* Keycloak inside the cluster speaks HTTP and HTTPS (`keycloak.config.httpEnabled: true` in the developer's overlay). Flip it to `false` only after every caller is green on HTTPS (add `config: { httpEnabled: false }` under `keycloak:` in the template).
 * Need ≥ 3 Ready nodes, a StorageClass with volume expansion, a LoadBalancer provider (two IPs: Envoy for `api.`, ingress for portal/admin/www/auth).
 
 ## PART D — Resource sizing (all in values files, nothing else to touch)
@@ -245,6 +267,8 @@ The Ingress is the Xailon chart change (PR #678, `ingress.yaml` + `ingress:` val
 `develop` is already 18 commits ahead (0.17.3 preparation, new validators such as `validate-sso-proof`, `validate-control-plaintext`). This package is pinned to 0.17.2 on purpose (it is what was tested). To move to 0.17.3: update the chart checkout, `TF_TAG`/`BRAND_TAG`, rebuild the bundle, run `dry-run`, and expect to fix whatever the new validators ask for.
 
 ## PART J — Changing a value later (any value, including the Ingress)
+**Quick finder:** `VALUES-GUIDE.md` lists every value of the developer's overlay and says which file and which section (with line numbers) of `config.env` / `values/umbrella.values.yaml.tmpl` to edit.
+
 **The loop is always the same:** edit → `dry-run` → apply → check.
 ```
 nano ~/etisalat/config.env                       # site values (domain, tag, SMTP, cert, …)    OR
@@ -290,6 +314,25 @@ After any Ingress edit: `kubectl -n tokenfactory-etisalat get ingress tokenfacto
 | Envoy replicas / limits | template `tf-gateway-resources.envoyProxy…envoyDeployment` |
 | Postgres size / instances / parameters | `zalando/charts/pgdb/values.yaml`, then `deploy-all.sh pg` (disk can only grow) |
 | A value that has no key in the template yet | add the key exactly as it appears in the chart's `values.yaml` (see `ai-gateway-platform/helm/tokenfactory/values-tf-prod.yaml` for every available key and its comment); lists such as `tf-ledger.env` are **replaced wholesale** — copy the whole list from `values-tf-etisalat.yaml` and change the one entry |
+
+## PART K — `tokenfactory-secrets`: what the developer's overlay requires, and what `deploy-all.sh secrets` creates
+The overlay sets `global.secrets.existingSecret: tokenfactory-secrets` (the chart then renders no Secret of its own). `deploy-all.sh secrets` creates it with fresh random values; nothing is copied from another environment.
+| Key (from the overlay header) | Needed | Created by the script |
+|---|---|---|
+| `db-password`, `kc-db-username`, `kc-db-password`, `openfga-db-password` | required (the live DB passwords are the Zalando ones; these keys only have to exist) | yes (random; `kc-db-username=keycloak`) |
+| `jwt-secret`, `portal-jwt-secret` (same value), `admin-api-key`, `ce-userinfo-signing-key`, `auth-state-signing-key` | required | yes (64 hex chars) |
+| `encryption-key` | required, must decode to exactly 32 bytes | yes (`openssl rand -base64 32`) |
+| `kc-admin-username`, `kc-admin-password` | required | yes (`admin` + generated, meets the Keycloak policy) |
+| `platform-admin-password`, `platform-init-admin-password` | required, upper+lower+digit+special, ≥ 8 | yes |
+| `s3-access-key`, `s3-secret-key` | required (bundled MinIO + ledger archive) | yes |
+| `stripe-webhook-secret` | required, empty string allowed | yes, empty |
+| `stripe-secret-key` | optional (top-up is off in this brand) | yes, empty |
+| `smtp-password` | optional | yes, from `SMTP_PASSWORD` in `config.env` |
+| `kc-admin-sa-client-secret`, `kc-accounts-sa-client-secret`, `keycloak-tls`, `keycloak-ca` | generated **in the cluster** by the `kc-secrets` hook (`global.keycloakSecrets.generate: true`) | do not create by hand |
+| `google-/microsoft-/github-client-secret`, `sso-verification-google-client-secret`, `openfga-api-token` | only if social login / SSO verification / OpenFGA token is turned on (all off here) | no |
+| `persona-*`, `cdd-email-hmac-key` | only for the Persona CDD block (not in the chart on `develop` yet) | no |
+| the five `serviceKeyTf*` | not in the Secret: pod env literals | yes, in `~/.etisalat-service-keys.env`, passed through `rendered/service-keys.yaml` |
+Other objects the overlay expects to exist before the app: the pull secret (here `registry-pull`, instead of the overlay's `ghcr-secret`; the script creates it in every namespace), the gateway TLS secret `tf-etisalat-tls`, and the Zalando role Secrets `<role>.pgdb.credentials.postgresql.acid.zalan.do` (created by the operator). All of them are created by `deploy-all.sh` before the app is installed. To use your own secret manager instead (Vault, External Secrets): create `tokenfactory-secrets` with the keys above **before** running `deploy-all.sh all` — the `secrets` phase keeps an existing Secret (but still needs `~/.etisalat-service-keys.env`; create it with the five `SERVICE_KEY_TF_ACCOUNTS/LEDGER/CONTROL/RELAY/WARDEN` lines).
 
 ## What was verified in the lab (5 Nov 2026)
 Run on `aks-etisalat-test` (1 node, no internet) exactly as above: all 38 images loaded from tars (`ALL 38 IMAGES PRESENT`), Postgres Patroni leader Running, Keycloak 3/3 with one Infinispan cluster of 3 members, 3× Envoy, all tf-* services Ready, OpenMeter (Kafka 3, API 2, ClickHouse, Redis) Running; `www`, `portal`, `admin` → HTTP 200 through the NGINX ingress, Keycloak issuer `https://auth.etisalat.lab/auth/realms/master`, `api` via Envoy → 401 without a key (correct). Digest-pinned images (`@sha256`) start from the node tars.

@@ -70,17 +70,15 @@ tf-gateway-resources:
       provider:
         kubernetes:
           envoyDeployment:
-            replicas: 3                                                   # S1
+            replicas: 3                                                   # S1  (prod runs 10 behind Cloudflare; size to the expected load)
             container:
               image: "${REGISTRY}/envoyproxy/envoy:distroless-v1.38.1"    # data-plane image is not in any chart
-              resources:                                                  # S1
-                requests: { cpu: 500m, memory: 512Mi }
-                limits:   { cpu: "2",  memory: 2Gi }
+              resources: {}                                               # S1  same as tokenfactory-prod (no requests/limits on the Envoy container)
             pod:
               imagePullSecrets:
                 - name: registry-pull
           envoyPDB:
-            minAvailable: 2
+            minAvailable: 1                                               # same as tokenfactory-prod
 
 # ── Identity ──
 tf-auth:
@@ -99,10 +97,10 @@ tf-auth:
 
 keycloak:                                       # Keycloak HA
   replicaCount: 3                               # S3
-  resources:
-    requests: { cpu: 500m, memory: 1Gi }
-    limits:   { cpu: "2",  memory: 3Gi }
-  jvmHeapOpts: "-Xms512m -Xmx1536m -XX:+UseContainerSupport"   # keep Xmx well below limits.memory
+  resources:                                    # same as tokenfactory-prod (live): memory only, no CPU request/limit
+    requests: { memory: 1Gi }
+    limits:   { memory: 8Gi }
+  jvmHeapOpts: "-Xms512m -Xmx2g -XX:+UseContainerSupport"      # same as prod; keep Xmx well below limits.memory
   image:
     repository: keycloak/keycloak               # chart default is quay.io/keycloak/keycloak; mirror layout drops the host. Digest pin is kept.
   config:
@@ -180,5 +178,5 @@ tf-ops:        { replicas: 3, resources: { requests: { cpu: 20m,  memory: 48Mi  
 tf-warden:     { replicas: 3, resources: { requests: { cpu: 25m,  memory: 256Mi }, limits: { cpu: 1000m, memory: 1Gi   } } }
 tf-portal-web: { replicas: 3, resources: { requests: { cpu: 50m,  memory: 32Mi  }, limits: { cpu: 200m,  memory: 1Gi   } } }
 tf-admin-web:  { replicas: 3, resources: { requests: { cpu: 50m,  memory: 32Mi  }, limits: { cpu: 200m,  memory: 1Gi   } } }
-tf-docs-web:   { enabled: ${DOCS_WEB_ENABLED}, replicas: 3, resources: { requests: { cpu: 50m,  memory: 96Mi  }, limits: { cpu: 300m,  memory: 256Mi } } }
-tf-site-web:   { replicas: 3, resources: { requests: { cpu: 50m,  memory: 64Mi  }, limits: { cpu: 300m,  memory: 256Mi } } }
+tf-docs-web:   { enabled: ${DOCS_WEB_ENABLED}, replicas: 1, resources: { requests: { cpu: 50m,  memory: 96Mi  }, limits: { cpu: 300m,  memory: 256Mi } } }
+tf-site-web:   { replicas: 1, resources: { requests: { cpu: 50m,  memory: 64Mi  }, limits: { cpu: 300m,  memory: 256Mi } } }

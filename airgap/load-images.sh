@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Loads every image TAR into the containerd of EVERY node (no registry involved).  Run where bundle/tars lives (the jumphost).
+# Loads every image TAR into the containerd of EVERY node (no registry involved).  Run where bundle/tars lives (the install VM).
 #   NODE_LOAD_MODE=pod  : a privileged pod per node downloads the tars from a tiny HTTP server on this host and runs `ctr images import`
 #   NODE_LOAD_MODE=ssh  : scp + ssh to each entry of NODES ("user@ip ...")
 set -euo pipefail

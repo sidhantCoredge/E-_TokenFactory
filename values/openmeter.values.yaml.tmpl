@@ -50,8 +50,8 @@ openmeter:
     memoryGuard: { image: { repository: "${REGISTRY}/alpine/k8s" } }
     verify:      { image: { repository: "${REGISTRY}/alpine/k8s" } }
     resources:
-      requests: { cpu: 500m, memory: 2Gi }
-      limits:   { memory: 6Gi }              # the guardrails derive max_memory_usage from this limit
+      requests: { cpu: 250m, memory: 2Gi }       # same as tokenfactory-prod (live ClickHouse)
+      limits:   { memory: 8Gi }              # same as prod; the guardrails derive max_memory_usage from this limit
   # M5. Redis (bitnami, replication: 1 master + 3 replicas)
   redis:
     master:
