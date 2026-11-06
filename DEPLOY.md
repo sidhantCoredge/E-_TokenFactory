@@ -9,7 +9,7 @@ Three places are involved (in the lab, `[VM]` = the Azure jumphost). Every step 
 | **[VM]** | the dedicated Etisalat **install VM** inside the air-gap (there is no jumphost). It must reach the cluster API and the nodes. *Lab only: this role is played by the Azure jumphost `azureuser@10.40.1.4`* |
 | **[CLUSTER]** | the AKS lab `aks-etisalat-test` (real Etisalat: their cluster) |
 
-What gets installed (HA): Postgres (Zalando, 3 instances) for TokenFactory + Keycloak + OpenFGA + OpenMeter · Keycloak (3 replicas) · NGINX Ingress (portal/admin/www/auth) · Envoy AI Gateway (api) · OpenMeter · all tf-* services.
+What gets installed (HA), laid out like `tokenfactory-prod`: namespace **`tokenfactory`** = all tf-* services, Keycloak (3 replicas), the Ingress (portal/admin/www/auth), Envoy AI Gateway (api, ≥ 6 pods, no CPU/RAM limits) and the Postgres cluster `pgdb` (Zalando, 3 instances, external for the app); namespace **`postgres`** = the Zalando operator only; namespace **`openmeter`** = OpenMeter (uses `pgdb`).
 Lab note: a 1-node cluster cannot hold 3 Postgres instances, so the lab uses `SINGLE_NODE=yes` (1 instance). Everything else is identical.
 
 ---
@@ -84,12 +84,8 @@ If a tool really is missing on a brand-new VM, install it from the OS media/pack
 ```
 openssl req -x509 -newkey rsa:2048 -nodes -days 30 -keyout ~/wild.key -out ~/wild.crt -subj "/CN=*.etisalat.lab" -addext "subjectAltName=DNS:*.etisalat.lab,DNS:etisalat.lab"
 ```
-**B4. Serve the Keycloak plugin jar** (pods download it when Keycloak starts; keep it running during the whole deploy). Do NOT use `pkill -f` here — it kills your own SSH session.
-```
-cd ~/etisalat/bundle/jars && (setsid nohup python3 -m http.server 8001 >/tmp/jar.log 2>&1 < /dev/null &)
-cd ~/etisalat
-curl -sI http://$VM_IP:8001/keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar | head -1      # must print: HTTP/1.0 200 OK
-```
+**B4. Keycloak plugin jar — nothing to do.** Keycloak downloads this jar when each pod starts. It is **exactly the jar that tokenfactory-prod and the Xailon PR #678 use** (`keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar`, Maven Central, `mesutpiskin`) and it **is valid for Etisalat**: it matches the Keycloak 26.7 line, and the Keycloak image in this bundle is **26.7.5** (Xailon runs the same jar on 26.7.4). `tf-auth` needs it (it wires the email-OTP step and refuses to start without it). It is not built by us: step A5 downloads it to `bundle/jars/`. In an air-gap the installer hosts it **inside the cluster** (phase `jar`: a ConfigMap built from `bundle/jars/`, 2 tiny busybox `httpd` pods, Service `keycloak-spi`), because `KEYCLOAK_JAR_URL` is empty in `config.env`. Only if you prefer your own internal web server: put that URL in `KEYCLOAK_JAR_URL` (the cluster pods must reach it; serve the file from `bundle/jars/`).
+
 **B5. Edit `config.env`** (`nano config.env`). Set exactly these lines (everything else stays):
 ```
 export KUBECONFIG_FILE="/home/azureuser/etisalat.kubeconfig"
@@ -101,7 +97,6 @@ export TLS_CERT="/home/azureuser/wild.crt"
 export TLS_KEY="/home/azureuser/wild.key"
 export SMTP_HOST="smtp.etisalat.lab"          # lab: any name; mails will simply not be delivered
 export SMTP_USER="lab"
-export KEYCLOAK_JAR_URL="http://<VM-IP>:8001/keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar"     # lab: 10.40.1.4  (the pods must be able to reach this address)
 ```
 `TF_TAG` / `BRAND_TAG` are already filled (copied from the Mac). Nothing may still say `REPLACE_`:
 ```
@@ -125,7 +120,7 @@ Check on a node afterwards (any mode): `sudo ctr -n k8s.io images ls -q | grep -
 ```
 airgap/deploy-all.sh all 2>&1 | tee ~/etisalat-deploy.log
 ```
-Order it runs, with what each prints: `check` → `prepare` → `render` → `ns` → **`images`** (loads all 38 tars into the node; ends with `ALL 38 IMAGES PRESENT`) → `pg` (Postgres, waits for Running) → `secrets` → `controllers` (Envoy) → `ingress` → `openmeter` (slowest, up to 60 min) → `app` → `verify`.
+Order it runs, with what each prints: `check` → `prepare` → `render` → `ns` → **`images`** (loads all 38 tars into the node; ends with `ALL 38 IMAGES PRESENT`) → **`jar`** (hosts the Keycloak plugin jar in the cluster) → `pg` (Postgres, waits for Running) → `secrets` → `controllers` (Envoy) → `ingress` → `openmeter` (slowest, up to 60 min) → `app` → `verify`.
 Total 40–90 min. If anything fails, fix the cause and continue where it stopped:
 ```
 airgap/deploy-all.sh --from <phase>        # e.g. --from openmeter
@@ -174,23 +169,26 @@ Expected: `branding.sh` passes (brand `etisalat`, product `Token Factory by etis
 ---
 ## PART C — Real Etisalat (instead of the lab)
 Same steps, only these differences:
-* B3: use the real wildcard certificate; B5: `SINGLE_NODE="no"`, `LB_INTERNAL="no"`, real `DOMAIN`, `SMTP_*`, `STORAGE_CLASS`, a jar URL on an internal web server (or the install VM itself, as in B4).
+* B3: use the real wildcard certificate; B5: `SINGLE_NODE="no"`, `LB_INTERNAL="no"`, real `DOMAIN`, `SMTP_*`, `STORAGE_CLASS`, nothing for the Keycloak jar (the installer hosts it in the cluster).
 * Loading images: set in `config.env` **`export NODE_LOAD_MODE="ssh"`** and `export NODES="user@node1 user@node2 user@node3"` (the install VM must reach the nodes over SSH, the user needs passwordless `sudo`). This copies the tars with `scp` and runs `sudo ctr -n k8s.io images import` on each node — **no container image is needed**, so it works in a real air-gap.
   `pod` mode (the lab default) starts a helper pod and therefore needs an image that is *already on the node* and has `/bin/sh` + `chroot`. The lab got it from AKS's private MCR cache (`mcr.microsoft.com/azurelinux/busybox:1.36`); a real air-gap has no MCR/ACR, so the pod would sit in `ErrImagePull`. Use `pod` mode only if you set `LOADER_DEBUG_IMAGE` to an image that really exists on every node. No SSH to the nodes at all? Copy `bundle/tars` to each node by hand and run on it: `for f in *.tar; do sudo ctr -n k8s.io images import --all-platforms $f; done`.
 * TLS for `api.` — the developer's overlay offers two options: **(a) terminate at the Envoy Gateway** (what this package does: wildcard secret `tf-etisalat-tls`, listener 8443 published on 443) or **(b) terminate at an external load balancer / CDN**: add `tf-gateway-resources: { tls: { enabled: false } }` to `values/umbrella.values.yaml.tmpl` (Envoy then serves plain HTTP on 8080 only) and skip `TLS_CERT/TLS_KEY` for the gateway. The web hosts (portal/admin/www/auth) are always terminated by the NGINX ingress with the same wildcard secret.
 * Keycloak inside the cluster speaks HTTP and HTTPS (`keycloak.config.httpEnabled: true` in the developer's overlay). Flip it to `false` only after every caller is green on HTTPS (add `config: { httpEnabled: false }` under `keycloak:` in the template).
 * Need ≥ 3 Ready nodes, a StorageClass with volume expansion, a LoadBalancer provider (two IPs: Envoy for `api.`, ingress for portal/admin/www/auth).
 
-## PART D — Resource sizing (all in values files, nothing else to touch)
-| What | Edit |
+## PART D — Sizing and HA: all in `config.env` (section "SIZING & HA")
+Layout is the same as `tokenfactory-prod`: **`tokenfactory`** = everything of TokenFactory incl. the Postgres cluster `pgdb`; **`postgres`** = Zalando operator only; **`openmeter`** = OpenMeter.
+| What | `config.env` variable (default) |
 |---|---|
-| tf-* services, Keycloak, Envoy data plane, Redis, MinIO | `values/umbrella.values.yaml.tmpl` |
-| Postgres instances / CPU / RAM / disk | `zalando/charts/pgdb/values.yaml` |
-| OpenMeter (Kafka, ClickHouse CPU/RAM, workers) | `values/openmeter.values.yaml.tmpl` |
-| ClickHouse disk | `config.env` → `CH_DATA_SIZE`, `CH_LOG_SIZE` |
-| NGINX Ingress / Envoy controllers | `values/nginx-ingress…tmpl`, `values/envoy-gateway…tmpl`, `values/ai-gateway…tmpl` |
-
-After editing run only what changed, e.g. `airgap/deploy-all.sh render app`.
+| **Envoy** pods (all inference load; **no CPU/RAM requests or limits**, like prod; **minimum 6**) | `ENVOY_REPLICAS` (**6**), `ENVOY_PDB_MIN_AVAILABLE` (1) |
+| **Keycloak HA** | `KEYCLOAK_REPLICAS` (**3**), `KEYCLOAK_MEM_REQUEST/LIMIT` (1Gi/8Gi), `KEYCLOAK_HEAP` (`-Xmx2g`) |
+| **Postgres HA** (Zalando `pgdb`, external for the app) | `PG_INSTANCES` (**3**), `PG_VOLUME_SIZE` (20Gi), `PG_CPU_REQUEST/LIMIT` (1/4), `PG_MEM_REQUEST/LIMIT` (2Gi/8Gi), `PG_MAX_CONNECTIONS` (300) |
+| tf-* replicas | `TF_REPLICAS` (3; `tf-ledger` always 1), `SITE_DOCS_REPLICAS` (1) |
+| ClickHouse disk | `CH_DATA_SIZE`, `CH_LOG_SIZE` |
+| Ingress on/off | `INGRESS_ENABLED` (true) |
+| **anything else** (one service's CPU/RAM, annotations, SMTP SSL, …) | `CUSTOM_VALUES_YAML` (raw YAML, last section of `config.env`) |
+The CPU/RAM of every tf-* pod is already the **tokenfactory-prod live value** (checked on the running prod cluster). To change one, use `CUSTOM_VALUES_YAML`, e.g. `tf-relay: { replicas: 4, resources: { requests: { cpu: 100m, memory: 512Mi } } }` — see `VALUES-GUIDE.md` §3. OpenMeter, NGINX-ingress and the Envoy controllers keep their own small files (`values/openmeter…`, `values/nginx-ingress…`, `values/envoy-gateway…`, `values/ai-gateway…`).
+After editing `config.env`: `airgap/deploy-all.sh dry-run`, then `airgap/deploy-all.sh render ns app` (Postgres: `airgap/deploy-all.sh pg`).
 
 ## PART E — If something goes wrong
 | You see | Do |
@@ -204,13 +202,13 @@ After editing run only what changed, e.g. `airgap/deploy-all.sh render app`.
 | `FATAL: config.env still has REPLACE_` | fill that line |
 | `images` phase: `MISSING <image>` | the tar was not in the bundle → rebuild on the Mac (A5) and rsync again |
 | pod `ErrImagePull` / `ImagePullBackOff` | the image is not on that node. Run `airgap/deploy-all.sh images`. For `@sha256` images (keycloak, busybox, openmeter) also check `kubectl describe pod` shows the exact reference |
-| Keycloak not Ready | jar server (B4) stopped → restart B4; check `kubectl -n tokenfactory logs keycloak-0 -c fetch-providers` |
+| Keycloak not Ready / init `fetch-providers` fails | the jar server is not up: `kubectl -n tokenfactory get pods -l app.kubernetes.io/name=keycloak-spi` (2 pods Running) and `kubectl -n tokenfactory logs keycloak-0 -c fetch-providers`; fix and `airgap/deploy-all.sh jar`, then delete the Keycloak pod. With your own `KEYCLOAK_JAR_URL`: that URL must answer from inside a pod |
 | `pg` phase stuck | `kubectl -n tokenfactory describe postgresql pgdb`; on a 1-node cluster SINGLE_NODE must be `yes` |
 | `tf-accounts` stuck in `Init:ErrImagePull` on `tf-docs-web` | the docs image tar is missing on the node (its init container `legal-src` copies the legal pages out of it). `airgap/deploy-all.sh images`, then delete the pod |
 | `tf-ledger` CrashLoop: `Dirty database version N` | a pod was killed in the middle of a DB migration. Lab-safe fix: undo that one migration and let it re-run, e.g. for 5: `kubectl -n tokenfactory exec pgdb-0 -c postgres -- psql -U postgres -d tokenfactory -c "BEGIN; DROP TABLE IF EXISTS tf_credit_grants; UPDATE tf_ledger_schema_migrations SET version=4, dirty=false; COMMIT;"` then delete the tf-ledger pod. Do not delete pods while a first start is migrating |
 | `app` phase: `HARD BLOCKERS` from preflight | not used any more: `preflight.sh`'s OpenMeter probe runs in the `openmeter` namespace and OpenMeter's NetworkPolicy (Cilium) blocks it, so it can never pass. `deploy-all.sh` runs its own checks and calls install.sh with `SKIP_PREFLIGHT=1` |
 | `openmeter-billing-*-invoices-…` pods in `Error` | the first cron runs fired before OpenMeter finished starting; later runs show `Completed`. Ignore |
-| ssh session dies when you start/stop the jar server | never `pkill -f 'http.server …'` — the pattern also matches your own shell. Start with `(setsid nohup … &)`, stop by port (see Part F) |
+| your SSH session dies when you stop a background web server | never use `pkill -f '<text>'` — the pattern also matches your own shell. Stop by port (see Part F) |
 | AKS lab create failed: `Bootstrap Container Registry is not reachable` | the NSG of the private-endpoint subnet (`nsg-pe-tokenfactory`) only admits mgmt + the old AKS subnet. `Etisalat-aks.tf` adds rule `Allow-Etisalat-AKS` (443 from `10.40.16.0/26`); see Part G |
 | anything else | send the last 40 lines of `~/etisalat-deploy.log` |
 
@@ -237,7 +235,7 @@ Delete the cluster: `terraform destroy` with the `-target` list written at the t
 | 2 | Digest-pinned images (`@sha256`: keycloak, busybox 1.36, openmeter) | copied with `--all --preserve-digests`; loader also tags `name@sha256:…`. Confirmed working in the lab (tf-auth init uses the busybox digest) |
 | 3 | 4 image references are hardcoded in chart templates | `03-patch-hardcoded-images.sh` rewrites tf-auth busybox, OpenMeter busybox + clickhouse, and the ClickHouse PVC (upstream hardcodes 3Gi/1Gi and no StorageClass) |
 | 4 | No Ingress template on `develop` | PR #678 template is required in the chart checkout; `prepare` stops with an error if it is missing |
-| 5 | Keycloak downloads its SPI jar from Maven Central on every start | jar is served internally (`KEYCLOAK_JAR_URL`, step B4) |
+| 5 | Keycloak downloads its SPI jar from Maven Central on every start | the same jar as tokenfactory-prod / Xailon PR #678 (valid for Keycloak 26.7.x, bundle has 26.7.5) is bundled (`bundle/jars/`) and hosted inside the cluster by phase `jar` (ConfigMap + busybox httpd + Service `keycloak-spi`); `KEYCLOAK_JAR_URL` stays empty, or points to your own server |
 | 6 | GeoIP sidecar downloads from GitHub, NGINX controller phones home | GeoIP off (`tf-ledger.geoip.enabled: false`), controller telemetry off |
 | 7 | MinIO's official image no longer exists on Docker Hub/quay | step A7 builds the tar from the prod ACR |
 | 8 | No Etisalat-branded `tf-docs-web` image | default-brand image stored under the branded tag (needed by `tf-accounts` init `legal-src`); `DOCS_WEB=no`. **Ask the developer for an Etisalat docs build** |
@@ -274,12 +272,11 @@ The Ingress is the Xailon chart change (PR #678, `ingress.yaml` + `ingress:` val
 `develop` is already 18 commits ahead (0.17.3 preparation, new validators such as `validate-sso-proof`, `validate-control-plaintext`). This package is pinned to 0.17.2 on purpose (it is what was tested). To move to 0.17.3: update the chart checkout, `TF_TAG`/`BRAND_TAG`, rebuild the bundle, run `dry-run`, and expect to fix whatever the new validators ask for.
 
 ## PART J — Changing a value later (any value, including the Ingress)
-**Quick finder:** `VALUES-GUIDE.md` lists every value of the developer's overlay and says which file and which section (with line numbers) of `config.env` / `values/umbrella.values.yaml.tmpl` to edit.
+**Quick finder:** `VALUES-GUIDE.md` lists every `config.env` variable, how to change *any* other value with `CUSTOM_VALUES_YAML`, and what each key of the developer's overlay maps to.
 
 **The loop is always the same:** edit → `dry-run` → apply → check.
 ```
-nano ~/etisalat/config.env                       # site values (domain, tag, SMTP, cert, …)    OR
-nano ~/etisalat/values/umbrella.values.yaml.tmpl # anything else for the app (ingress, replicas, resources, Keycloak, Envoy, …)
+nano ~/etisalat/config.env                       # site values AND sizing (domain, tag, SMTP, cert, replicas, Keycloak/Postgres/Envoy, CUSTOM_VALUES_YAML)
 cd ~/etisalat
 airgap/deploy-all.sh dry-run                     # must end with "dry-run PASSED"
 airgap/deploy-all.sh render app                  # applies the app change (helm upgrade)
@@ -289,7 +286,8 @@ helm -n tokenfactory history tokenfactory      # every change is a revision; und
 Which phase applies which file:
 | You changed | Run |
 |---|---|
-| `config.env` (domain, SMTP, tag, cert) or `umbrella.values.yaml.tmpl` | `airgap/deploy-all.sh render ns app` (`ns` re-applies the TLS secret) |
+| `config.env` (domain, SMTP, tag, cert, replicas, Keycloak/Envoy sizing, `CUSTOM_VALUES_YAML`) | `airgap/deploy-all.sh render ns app` (`ns` re-applies the TLS secret) |
+| `config.env` `PG_*` (Postgres) | `airgap/deploy-all.sh pg` |
 | `zalando/charts/pgdb/values.yaml` | `airgap/deploy-all.sh pg` |
 | `values/openmeter.values.yaml.tmpl` | `airgap/deploy-all.sh render openmeter` |
 | `values/nginx-ingress.values.yaml.tmpl` (controller replicas/CPU/class) | `airgap/deploy-all.sh render ingress` |

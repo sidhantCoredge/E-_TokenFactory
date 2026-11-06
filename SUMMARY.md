@@ -28,7 +28,7 @@ A sample TokenFactory is **up in namespace `tokenfactory`** on the isolated sing
 12. Loader re-copied 4 GB on every run — it now skips images that are already on the node.
 
 ## Lab-only settings (set back for real Etisalat)
-`SINGLE_NODE=yes` (→ `no`), `LB_INTERNAL=yes` (→ `no` outside Azure), `NODE_LOAD_MODE=pod` (→ `ssh` if nodes have SSH), self-signed `*.etisalat.lab` certificate, dummy SMTP host, jar served from the jumphost (use an internal web server).
+`SINGLE_NODE=yes` (→ `no`), `LB_INTERNAL=yes` (→ `no` outside Azure), `NODE_LOAD_MODE=pod` (→ `ssh` if nodes have SSH), self-signed `*.etisalat.lab` certificate, dummy SMTP host, Keycloak jar: lab used the jumphost; now `KEYCLOAK_JAR_URL` is empty and the jar is hosted in the cluster.
 
 ## Open items
 - **Developer:** build the Etisalat-branded `tf-docs-web` image (then `DOCS_WEB=yes`); ticket for `tf-ledger` leader election (it must stay at 1 replica).

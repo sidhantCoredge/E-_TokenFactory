@@ -4,10 +4,10 @@
 #   ./deploy-all.sh dry-run          render EVERY chart offline with helm template (no cluster needed) - run this first
 #   ./deploy-all.sh all              check -> prepare -> render -> ns -> images -> pg -> secrets -> controllers -> ingress -> openmeter -> app -> verify
 #   ./deploy-all.sh <phase> [...]    run specific phases;   ./deploy-all.sh --from <phase>   resume from a phase
-# Phases: check prepare render ns images pg secrets controllers ingress openmeter app verify   (push = optional, only if you DO have a registry)
+# Phases: check prepare render ns images jar pg secrets controllers ingress openmeter app verify   (push = optional, only if you DO have a registry)
 set -euo pipefail
 cd "$(dirname "$0")"; . ./env.sh
-PHASES=(check prepare render ns images pg secrets controllers ingress openmeter app verify)
+PHASES=(check prepare render ns images jar pg secrets controllers ingress openmeter app verify)
 ALLPH=(push "${PHASES[@]}")
 OUT="$ROOT/rendered"; KEYFILE="${KEYFILE:-$HOME/.etisalat-service-keys.env}"
 C="$BUNDLE_DIR/charts"; ZC="$ROOT/zalando/charts"
@@ -17,7 +17,20 @@ need(){ command -v "$1" >/dev/null 2>&1 || die "missing tool: $1"; }
 wait_for(){ # desc timeout_s cmd...
   local d="$1" t="$2"; shift 2; local s=$SECONDS
   until "$@" >/dev/null 2>&1; do [ $((SECONDS-s)) -gt "$t" ] && die "timeout (${t}s) waiting for: $d"; sleep 5; done; echo "  ok: $d"; }
-VARS='REGISTRY TF_TAG BRAND_TAG DOMAIN SUPPORT_EMAIL STORAGE_CLASS PLATFORM_ADMIN_EMAIL SMTP_HOST SMTP_PORT SMTP_USER KEYCLOAK_JAR_URL DOCS_WEB_ENABLED'
+VARS='REGISTRY TF_TAG BRAND_TAG DOMAIN SUPPORT_EMAIL STORAGE_CLASS PLATFORM_ADMIN_EMAIL SMTP_HOST SMTP_PORT SMTP_USER KEYCLOAK_JAR_URL DOCS_WEB_ENABLED ENVOY_REPLICAS ENVOY_PDB_MIN_AVAILABLE KEYCLOAK_REPLICAS KEYCLOAK_MEM_REQUEST KEYCLOAK_MEM_LIMIT KEYCLOAK_HEAP TF_REPLICAS SITE_DOCS_REPLICAS INGRESS_ENABLED'
+# Keycloak SPI jar: empty KEYCLOAK_JAR_URL = host the bundled jar inside the cluster (phase `jar`)
+JAR_FILE="$(ls "$BUNDLE_DIR"/jars/*.jar 2>/dev/null | head -1 || true)"; JAR_INCLUSTER=0
+if [ -z "${KEYCLOAK_JAR_URL:-}" ]; then JAR_INCLUSTER=1; KEYCLOAK_JAR_URL="http://keycloak-spi.${NAMESPACE}.svc.cluster.local:8080/$(basename "${JAR_FILE:-keycloak-2fa-email-authenticator.jar}")"; fi
+export KEYCLOAK_JAR_URL
+# defaults keep an older config.env working
+: "${ENVOY_REPLICAS:=6}" "${ENVOY_PDB_MIN_AVAILABLE:=1}" "${KEYCLOAK_REPLICAS:=3}" "${KEYCLOAK_MEM_REQUEST:=1Gi}" "${KEYCLOAK_MEM_LIMIT:=8Gi}"
+: "${KEYCLOAK_HEAP:=-Xms512m -Xmx2g -XX:+UseContainerSupport}" "${TF_REPLICAS:=3}" "${SITE_DOCS_REPLICAS:=1}" "${INGRESS_ENABLED:=true}"
+: "${PG_INSTANCES:=3}" "${PG_VOLUME_SIZE:=20Gi}" "${PG_CPU_REQUEST:=1}" "${PG_MEM_REQUEST:=2Gi}" "${PG_CPU_LIMIT:=4}" "${PG_MEM_LIMIT:=8Gi}" "${PG_MAX_CONNECTIONS:=300}"
+export ENVOY_REPLICAS ENVOY_PDB_MIN_AVAILABLE KEYCLOAK_REPLICAS KEYCLOAK_MEM_REQUEST KEYCLOAK_MEM_LIMIT KEYCLOAK_HEAP TF_REPLICAS SITE_DOCS_REPLICAS INGRESS_ENABLED
+INST_DEF="$PG_INSTANCES"; [ "${SINGLE_NODE:-no}" = yes ] && INST_DEF=1
+PG_SET=(--set registry="$REGISTRY" --set volume.storageClass="$STORAGE_CLASS" --set numberOfInstances="$INST_DEF" --set-string volume.size="$PG_VOLUME_SIZE"
+        --set-string resources.requests.cpu="$PG_CPU_REQUEST" --set-string resources.requests.memory="$PG_MEM_REQUEST"
+        --set-string resources.limits.cpu="$PG_CPU_LIMIT" --set-string resources.limits.memory="$PG_MEM_LIMIT" --set-string parameters.max_connections="$PG_MAX_CONNECTIONS")
 DRY=0
 export DOCS_WEB_ENABLED=$([ "${DOCS_WEB:-no}" = yes ] && echo true || echo false)
 kc(){ if [ $DRY = 1 ]; then echo "  [dry-run] kubectl $*"; else kubectl "$@"; fi; }
@@ -29,7 +42,7 @@ phase_check(){
   if [ "${IMAGE_MODE:-tar}" = registry ]; then need skopeo; case "$REGISTRY" in registry.etisalat.local*) die "IMAGE_MODE=registry but REGISTRY is still the placeholder name";; esac; fi
   local bad; bad=$(grep -nE 'REPLACE_' "$ROOT/config.env" | grep -v '^[0-9]*:\s*#' || true)
   [ -z "$bad" ] || die "config.env still has REPLACE_ values:"$'\n'"$bad"
-  for v in REGISTRY NAMESPACE DOMAIN TF_TAG BRAND_TAG STORAGE_CLASS SMTP_HOST SMTP_PORT SMTP_USER KEYCLOAK_JAR_URL TLS_CERT TLS_KEY CH_DATA_SIZE CH_LOG_SIZE; do [ -n "${!v:-}" ] || die "config.env: $v is empty"; done
+  for v in REGISTRY NAMESPACE DOMAIN TF_TAG BRAND_TAG STORAGE_CLASS SMTP_HOST SMTP_PORT SMTP_USER TLS_CERT TLS_KEY CH_DATA_SIZE CH_LOG_SIZE; do [ -n "${!v:-}" ] || die "config.env: $v is empty"; done
   case "$REGISTRY" in *://*) die "REGISTRY must be host[:port] without scheme";; esac
   [ -f "$TLS_CERT" ] && [ -f "$TLS_KEY" ] || die "TLS_CERT / TLS_KEY files not found"
   openssl x509 -in "$TLS_CERT" -noout -checkend 0 >/dev/null || die "TLS certificate is expired"
@@ -44,6 +57,7 @@ phase_check(){
     if [ "$PG_OPERATOR_MODE" = existing ]; then kubectl get crd postgresqls.acid.zalan.do >/dev/null 2>&1 || die "PG_OPERATOR_MODE=existing but no postgresqls.acid.zalan.do CRD"; fi
     [ -s "$BUNDLE_DIR/tars/INDEX" ] || die "image tars missing: $BUNDLE_DIR/tars (copy the bundle)"
   fi
+  if [ $JAR_INCLUSTER = 1 ]; then [ -s "$JAR_FILE" ] || die "no Keycloak jar in $BUNDLE_DIR/jars (rebuild the bundle) and KEYCLOAK_JAR_URL is empty"; fi
   echo "  check passed"
 }
 
@@ -69,6 +83,7 @@ phase_render(){
     envsub $VARS < "$ROOT/values/$n.values.yaml.tmpl" > "$OUT/$n.yaml"
     ! grep -q '\${' "$OUT/$n.yaml" || die "unreplaced \${VAR} in $OUT/$n.yaml: $(grep -n '\${' "$OUT/$n.yaml" | head -2)"
   done
+  if [ -n "${CUSTOM_VALUES_YAML//[[:space:]]/}" ]; then printf '%s\n' "$CUSTOM_VALUES_YAML" > "$OUT/custom.yaml"; echo "  custom values from config.env CUSTOM_VALUES_YAML applied"; else echo '{}' > "$OUT/custom.yaml"; fi
   if [ "${LB_INTERNAL:-no}" = yes ]; then cp "$ROOT/values/lb-internal.umbrella.yaml" "$OUT/lb-umbrella.yaml"; cp "$ROOT/values/lb-internal.nginx.yaml" "$OUT/lb-nginx.yaml"
   else cp "$ROOT/values/lb-none.yaml" "$OUT/lb-umbrella.yaml"; cp "$ROOT/values/lb-none.yaml" "$OUT/lb-nginx.yaml"; fi
   echo "  rendered values (no secrets inside); LB_INTERNAL=${LB_INTERNAL:-no}"
@@ -87,6 +102,43 @@ phase_ns(){
   echo "  tf-etisalat-tls: applied"
 }
 
+phase_jar(){
+  log "Keycloak SPI jar server"
+  if [ $JAR_INCLUSTER = 0 ]; then echo "  using your own URL: $KEYCLOAK_JAR_URL (nothing to host)"; return 0; fi
+  local name; name="$(basename "$JAR_FILE")"
+  kubectl -n "$NAMESPACE" create configmap keycloak-spi-jar --from-file="$JAR_FILE" --dry-run=client -o yaml | kc apply -f - >/dev/null
+  cat <<YAML | kc apply -f - >/dev/null
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: keycloak-spi, namespace: $NAMESPACE, labels: { app.kubernetes.io/name: keycloak-spi } }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app.kubernetes.io/name: keycloak-spi } }
+  template:
+    metadata: { labels: { app.kubernetes.io/name: keycloak-spi } }
+    spec:
+      containers:
+      - name: httpd
+        image: $REGISTRY/busybox:1.37.0
+        imagePullPolicy: IfNotPresent
+        command: ["httpd","-f","-p","8080","-h","/www"]
+        ports: [ { containerPort: 8080 } ]
+        securityContext: { runAsNonRoot: true, runAsUser: 65534, readOnlyRootFilesystem: true, allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+        resources: { requests: { cpu: 5m, memory: 8Mi }, limits: { cpu: 50m, memory: 32Mi } }
+        volumeMounts: [ { name: jar, mountPath: /www } ]
+      volumes: [ { name: jar, configMap: { name: keycloak-spi-jar } } ]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: keycloak-spi, namespace: $NAMESPACE }
+spec:
+  selector: { app.kubernetes.io/name: keycloak-spi }
+  ports: [ { port: 8080, targetPort: 8080 } ]
+YAML
+  [ $DRY = 1 ] || wait_for "keycloak-spi ready" 300 kubectl -n "$NAMESPACE" rollout status deploy/keycloak-spi --timeout=10s
+  echo "  jar URL for Keycloak: $KEYCLOAK_JAR_URL"
+}
+
 phase_pg(){
   log "Postgres HA (Zalando) - mode: $PG_OPERATOR_MODE"
   if [ "$PG_OPERATOR_MODE" = install ]; then
@@ -94,8 +146,8 @@ phase_pg(){
     [ $DRY = 1 ] || wait_for "postgres-operator Available" 180 kubectl -n postgres rollout status deploy/postgres-operator --timeout=10s
     [ $DRY = 1 ] || wait_for "CRD postgresqls.acid.zalan.do" 120 kubectl get crd postgresqls.acid.zalan.do
   fi
-  local INST=3; [ "${SINGLE_NODE:-no}" = yes ] && INST=1
-  helm upgrade --install pgdb "$ZC/pgdb" -n "$NAMESPACE" --set registry="$REGISTRY" --set volume.storageClass="$STORAGE_CLASS" --set numberOfInstances=$INST
+  local INST="$INST_DEF"
+  helm upgrade --install pgdb "$ZC/pgdb" -n "$NAMESPACE" "${PG_SET[@]}"
   [ $DRY = 1 ] && return 0
   wait_for "pgdb status Running" 900 bash -c "[ \"\$(kubectl -n $NAMESPACE get postgresql pgdb -o jsonpath='{.status.PostgresClusterStatus}')\" = Running ]"
   wait_for "$INST pgdb pods Ready" 600 bash -c "[ \"\$(kubectl -n $NAMESPACE get pods -l cluster-name=pgdb,application=spilo --no-headers | grep -c ' 2/2\\| 1/1')\" -ge $INST ]"
@@ -182,7 +234,7 @@ phase_app(){
   kubectl -n "$NAMESPACE" get secret tokenfactory-secrets tf-etisalat-tls >/dev/null || die "tokenfactory-secrets / tf-etisalat-tls missing in $NAMESPACE"
   echo "  pre-install checks ok (CRDs, OpenMeter API, secrets)"
   SKIP_PREFLIGHT=1 CHART_DIR="$REPO/helm/tokenfactory" RELEASE=tokenfactory NAMESPACE="$NAMESPACE" VALUES="$REPO/helm/tokenfactory/values-tf-etisalat.yaml" \
-    HELM_ARGS="-f $OUT/umbrella.yaml -f $OUT/lb-umbrella.yaml -f $OUT/service-keys.yaml --timeout 30m" \
+    HELM_ARGS="-f $OUT/umbrella.yaml -f $OUT/lb-umbrella.yaml -f $OUT/custom.yaml -f $OUT/service-keys.yaml --timeout 30m" \
     "$REPO/helm/setup/scripts/install.sh"
 }
 
@@ -207,13 +259,13 @@ phase_dryrun(){
   log "dry-run: helm template of every release"
   T(){ helm template "$@" >/dev/null && echo "  ok: $1"; }
   T postgres-operator "$ZC/postgres-operator" -n postgres --set registry="$REGISTRY"
-  T pgdb "$ZC/pgdb" -n "$NAMESPACE" --set registry="$REGISTRY" --set volume.storageClass="$STORAGE_CLASS"
+  T pgdb "$ZC/pgdb" -n "$NAMESPACE" "${PG_SET[@]}"
   T eg "$C/gateway-helm-v1.8.1.tgz" -n envoy-gateway-system -f "$REPO/helm/setup/scripts/envoygateway-config.yaml" -f "$OUT/envoy-gateway.yaml" --set config.envoyGateway.provider.kubernetes.deploy.type=GatewayNamespace
   T aieg "$C/ai-gateway-helm-v1.0.0.tgz" -n envoy-ai-gateway-system -f "$OUT/ai-gateway.yaml"
   T nginx-ingress "$C/nginx-ingress-1.3.2.tgz" -n nginx-ingress -f "$OUT/nginx-ingress.yaml" -f "$OUT/lb-nginx.yaml"
   T openmeter "$REPO/helm/infrastructure/openmeter" -n openmeter -f "$OUT/openmeter.yaml" --set openmeter.clickhouseCredentials.existingSecretName=om-clickhouse-pw --set openmeter.config.postgres.url=x --set openmeter.svix.database.dsn=x
   write_service_keys dryrun dryrun dryrun dryrun dryrun
-  T tokenfactory "$REPO/helm/tokenfactory" -n "$NAMESPACE" -f "$REPO/helm/tokenfactory/values-tf-etisalat.yaml" -f "$OUT/umbrella.yaml" -f "$OUT/lb-umbrella.yaml" -f "$OUT/service-keys.yaml" \
+  T tokenfactory "$REPO/helm/tokenfactory" -n "$NAMESPACE" -f "$REPO/helm/tokenfactory/values-tf-etisalat.yaml" -f "$OUT/umbrella.yaml" -f "$OUT/lb-umbrella.yaml" -f "$OUT/custom.yaml" -f "$OUT/service-keys.yaml" \
     --set-file keycloak.theme.archive="$REPO/brands/etisalat/keycloak/theme.tar.gz.b64"
   log "dry-run PASSED - safe to run: ./deploy-all.sh all"
 }

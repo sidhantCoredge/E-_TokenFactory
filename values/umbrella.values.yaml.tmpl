@@ -1,6 +1,7 @@
 # TokenFactory umbrella chart overlay for Etisalat (air-gap, HA).  Layered on helm/tokenfactory/values-tf-etisalat.yaml.
 # Placeholders in braces come from config.env (rendered by deploy-all.sh). DO NOT put secrets here.
-# >>> RESOURCE SIZING: edit the `resources:` / `replicas:` blocks in THIS file (sections S1-S4). Nothing else needs touching. <<<
+# >>> SIZING: replicas of Envoy/Keycloak/tf-*/Postgres come from config.env (SIZING & HA section). Per-service CPU/RAM below are the tokenfactory-prod values;
+#     to change one WITHOUT editing this file use CUSTOM_VALUES_YAML in config.env. <<<
 
 global:
   imageRegistry: "${REGISTRY}"               # infra images (keycloak, minio, redis, openfga, postgres, alpine, busybox)
@@ -41,7 +42,7 @@ global:
 
 # ── Ingress: portal / admin / site / auth (F5 nginx.org controller). api.<domain> goes to Envoy, NOT here. ──
 ingress:
-  enabled: true
+  enabled: ${INGRESS_ENABLED}
   name: tokenfactory
   className: nginx
   annotations:
@@ -70,7 +71,7 @@ tf-gateway-resources:
       provider:
         kubernetes:
           envoyDeployment:
-            replicas: 3                                                   # S1  (prod runs 10 behind Cloudflare; size to the expected load)
+            replicas: ${ENVOY_REPLICAS}                                                   # S1  (config.env ENVOY_REPLICAS; prod runs 10; minimum 6)
             container:
               image: "${REGISTRY}/envoyproxy/envoy:distroless-v1.38.1"    # data-plane image is not in any chart
               resources: {}                                               # S1  same as tokenfactory-prod (no requests/limits on the Envoy container)
@@ -78,11 +79,11 @@ tf-gateway-resources:
               imagePullSecrets:
                 - name: registry-pull
           envoyPDB:
-            minAvailable: 1                                               # same as tokenfactory-prod
+            minAvailable: ${ENVOY_PDB_MIN_AVAILABLE}                                               # config.env ENVOY_PDB_MIN_AVAILABLE (prod: 1)
 
 # ── Identity ──
 tf-auth:
-  replicas: 3                                  # S2
+  replicas: ${TF_REPLICAS}                                  # S2
   resources:
     requests: { cpu: 50m, memory: 64Mi }
     limits:   { cpu: 200m, memory: 256Mi }
@@ -96,11 +97,11 @@ tf-auth:
         from: "${SUPPORT_EMAIL}"
 
 keycloak:                                       # Keycloak HA
-  replicaCount: 3                               # S3
+  replicaCount: ${KEYCLOAK_REPLICAS}                               # S3  (config.env KEYCLOAK_REPLICAS)
   resources:                                    # same as tokenfactory-prod (live): memory only, no CPU request/limit
-    requests: { memory: 1Gi }
-    limits:   { memory: 8Gi }
-  jvmHeapOpts: "-Xms512m -Xmx2g -XX:+UseContainerSupport"      # same as prod; keep Xmx well below limits.memory
+    requests: { memory: ${KEYCLOAK_MEM_REQUEST} }
+    limits:   { memory: ${KEYCLOAK_MEM_LIMIT} }
+  jvmHeapOpts: "${KEYCLOAK_HEAP}"      # same as prod; keep Xmx well below limits.memory
   image:
     repository: keycloak/keycloak               # chart default is quay.io/keycloak/keycloak; mirror layout drops the host. Digest pin is kept.
   config:
@@ -169,14 +170,14 @@ tf-ledger:
     enabled: false                              # downloads from GitHub at runtime -> off in an air-gap
 
 # ── S2. TokenFactory services: replicas + resources (defaults = chart defaults; raise for production load) ──
-tf-accounts:   { replicas: 3, resources: { requests: { cpu: 50m,  memory: 64Mi  }, limits: { cpu: 200m,  memory: 256Mi } } }
-tf-relay:      { replicas: 3, resources: { requests: { cpu: 50m,  memory: 256Mi }, limits: { cpu: 1000m, memory: 1Gi   } } }
-tf-babel:      { replicas: 3, resources: { requests: { cpu: 25m,  memory: 32Mi  }, limits: { cpu: 300m,  memory: 256Mi } } }
-tf-shim:       { replicas: 3, resources: { requests: { cpu: 25m,  memory: 256Mi }, limits: { cpu: 1000m, memory: 1Gi   } } }
-tf-control:    { replicas: 3, resources: { requests: { cpu: 25m,  memory: 64Mi  }, limits: { cpu: 500m,  memory: 256Mi } } }
-tf-ops:        { replicas: 3, resources: { requests: { cpu: 20m,  memory: 48Mi  }, limits: { cpu: 250m,  memory: 128Mi } } }
-tf-warden:     { replicas: 3, resources: { requests: { cpu: 25m,  memory: 256Mi }, limits: { cpu: 1000m, memory: 1Gi   } } }
-tf-portal-web: { replicas: 3, resources: { requests: { cpu: 50m,  memory: 32Mi  }, limits: { cpu: 200m,  memory: 1Gi   } } }
-tf-admin-web:  { replicas: 3, resources: { requests: { cpu: 50m,  memory: 32Mi  }, limits: { cpu: 200m,  memory: 1Gi   } } }
-tf-docs-web:   { enabled: ${DOCS_WEB_ENABLED}, replicas: 1, resources: { requests: { cpu: 50m,  memory: 96Mi  }, limits: { cpu: 300m,  memory: 256Mi } } }
-tf-site-web:   { replicas: 1, resources: { requests: { cpu: 50m,  memory: 64Mi  }, limits: { cpu: 300m,  memory: 256Mi } } }
+tf-accounts:   { replicas: ${TF_REPLICAS}, resources: { requests: { cpu: 50m,  memory: 64Mi  }, limits: { cpu: 200m,  memory: 256Mi } } }
+tf-relay:      { replicas: ${TF_REPLICAS}, resources: { requests: { cpu: 50m,  memory: 256Mi }, limits: { cpu: 1000m, memory: 1Gi   } } }
+tf-babel:      { replicas: ${TF_REPLICAS}, resources: { requests: { cpu: 25m,  memory: 32Mi  }, limits: { cpu: 300m,  memory: 256Mi } } }
+tf-shim:       { replicas: ${TF_REPLICAS}, resources: { requests: { cpu: 25m,  memory: 256Mi }, limits: { cpu: 1000m, memory: 1Gi   } } }
+tf-control:    { replicas: ${TF_REPLICAS}, resources: { requests: { cpu: 25m,  memory: 64Mi  }, limits: { cpu: 500m,  memory: 256Mi } } }
+tf-ops:        { replicas: ${TF_REPLICAS}, resources: { requests: { cpu: 20m,  memory: 48Mi  }, limits: { cpu: 250m,  memory: 128Mi } } }
+tf-warden:     { replicas: ${TF_REPLICAS}, resources: { requests: { cpu: 25m,  memory: 256Mi }, limits: { cpu: 1000m, memory: 1Gi   } } }
+tf-portal-web: { replicas: ${TF_REPLICAS}, resources: { requests: { cpu: 50m,  memory: 32Mi  }, limits: { cpu: 200m,  memory: 1Gi   } } }
+tf-admin-web:  { replicas: ${TF_REPLICAS}, resources: { requests: { cpu: 50m,  memory: 32Mi  }, limits: { cpu: 200m,  memory: 1Gi   } } }
+tf-docs-web:   { enabled: ${DOCS_WEB_ENABLED}, replicas: ${SITE_DOCS_REPLICAS}, resources: { requests: { cpu: 50m,  memory: 96Mi  }, limits: { cpu: 300m,  memory: 256Mi } } }
+tf-site-web:   { replicas: ${SITE_DOCS_REPLICAS}, resources: { requests: { cpu: 50m,  memory: 64Mi  }, limits: { cpu: 300m,  memory: 256Mi } } }
