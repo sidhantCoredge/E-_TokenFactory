@@ -46,7 +46,7 @@ cd ~/Downloads/ethisalat
 airgap/01-bundle-connected.sh
 ```
 It ends with `== done. total size:` and `image tars: 37 of 38`. **The one missing tar is MinIO** — its public images were removed from Docker Hub and quay.io (that is why the script prints one `FAILED images` entry). It is created in step A7. Anything else listed as FAILED is a real error: fix it and re-run A5 (finished images are skipped).
-Result: `bundle/tars/*.tar`, `bundle/charts`, `bundle/crds`, `bundle/jars`, `bundle/tools/helm` and `bundle/tools/kubectl` (Linux binaries for the air-gap side).
+Result: `bundle/tars/*.tar`, `bundle/charts`, `bundle/crds`, `bundle/jars` (the Keycloak plugin jar, see B4), `bundle/tools/helm` and `bundle/tools/kubectl` (Linux binaries for the air-gap side).
 
 **A6. Copy everything to the install VM** (resumable). First time as written; when you copy again later add `--exclude config.env` so your filled-in file on the VM is not overwritten
 ```
@@ -75,7 +75,7 @@ export VM_IP=<this VM's IP as the cluster nodes see it>      # lab: 10.40.1.4
 ```
 ls ~/etisalat.kubeconfig && ~/etisalat/bundle/tools/kubectl --kubeconfig ~/etisalat.kubeconfig get nodes
 for t in perl python3 openssl tar; do command -v $t >/dev/null && echo "ok $t" || echo "MISSING $t"; done
-ls ai-gateway-platform/helm/tokenfactory/templates/ingress.yaml bundle/tars/INDEX bundle/tools/helm bundle/tools/kubectl
+ls ai-gateway-platform/helm/tokenfactory/templates/ingress.yaml bundle/tars/INDEX bundle/tools/helm bundle/tools/kubectl bundle/jars/*.jar
 ```
 If a tool really is missing on a brand-new VM, install it from the OS media/package mirror of that VM (only `perl`/`python3`/`openssl` are ever needed). `make`, `envsubst` and `skopeo` are NOT needed in the air-gap.
 (Lab only, if the kubeconfig is missing: `az aks get-credentials -g rg-tokenfactory -n aks-etisalat-test --admin --file ~/etisalat.kubeconfig`.)
@@ -84,7 +84,21 @@ If a tool really is missing on a brand-new VM, install it from the OS media/pack
 ```
 openssl req -x509 -newkey rsa:2048 -nodes -days 30 -keyout ~/wild.key -out ~/wild.crt -subj "/CN=*.etisalat.lab" -addext "subjectAltName=DNS:*.etisalat.lab,DNS:etisalat.lab"
 ```
-**B4. Keycloak plugin jar — nothing to do.** Keycloak downloads this jar when each pod starts. It is **exactly the jar that tokenfactory-prod and the Xailon PR #678 use** (`keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar`, Maven Central, `mesutpiskin`) and it **is valid for Etisalat**: it matches the Keycloak 26.7 line, and the Keycloak image in this bundle is **26.7.5** (Xailon runs the same jar on 26.7.4). `tf-auth` needs it (it wires the email-OTP step and refuses to start without it). It is not built by us: step A5 downloads it to `bundle/jars/`. In an air-gap the installer hosts it **inside the cluster** (phase `jar`: a ConfigMap built from `bundle/jars/`, 2 tiny busybox `httpd` pods, Service `keycloak-spi`), because `KEYCLOAK_JAR_URL` is empty in `config.env`. Only if you prefer your own internal web server: put that URL in `KEYCLOAK_JAR_URL` (the cluster pods must reach it; serve the file from `bundle/jars/`).
+**B4. Keycloak plugin jar — nothing to download, it is inside the bundle.**
+* **What it is:** `keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar` (Maven Central, `mesutpiskin`) — **exactly the jar tokenfactory-prod and the Xailon PR #678 use**, and it **is valid for Etisalat**: it matches the Keycloak 26.7 line, the Keycloak image in this bundle is **26.7.5** (Xailon runs the same jar on 26.7.4). `tf-auth` needs it (it wires the email-OTP step and refuses to start without it). We do not build it.
+* **Where it comes from:** step A5 downloads it on the Mac into `bundle/jars/`; the whole `bundle/` folder reaches the VM with A6. It is **not in the git repo** (the repo has no `bundle/`).
+* **Check it on the VM** (size 90807 bytes):
+  ```
+  cd ~/etisalat/bundle/jars && ls -l *.jar && sha256sum *.jar
+  # 8b478b84e0ab1e812f7d512c648f37ef9fbb9154343be373e7127fcfa0c9d3ba  keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar
+  ```
+  If the folder is empty (the download in A5 failed), open this URL on any machine with internet and put the file into `bundle/jars/`:
+  `https://repo1.maven.org/maven2/io/github/mesutpiskin/keycloak-2fa-email-authenticator/26.5.0-KC26.7.3/keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar`
+  Without the jar `airgap/deploy-all.sh check` stops with *"no Keycloak jar in …/jars"*.
+* **How Keycloak gets it in the air-gap:** `KEYCLOAK_JAR_URL` is **empty** in `config.env` (leave it empty; the Maven Central URL only works with internet). Phase `jar` of B7 puts the file into ConfigMap `keycloak-spi-jar` and serves it with **2 tiny busybox `httpd` pods behind Service `keycloak-spi`** in namespace `tokenfactory`. Every Keycloak pod (all 3 of the HA set) downloads it from there in its init container `fetch-providers` when it starts.
+* **HA behaviour:** two jar pods, so one can fail. Running Keycloak pods are never affected. Only if **both** jar pods are down *and* a Keycloak pod restarts at that moment, that pod waits (`Init`) until a jar pod is back.
+* **Your own server instead:** put its URL in `KEYCLOAK_JAR_URL` (it must serve that same file and be reachable from inside a pod); the `jar` phase then does nothing.
+* **After B7** confirm: `kubectl -n tokenfactory get pods -l app.kubernetes.io/name=keycloak-spi` shows 2 pods Running (this in-cluster server has not yet been run on the real cluster — report it if not).
 
 **B5. Edit `config.env`** (`nano config.env`). Set exactly these lines (everything else stays):
 ```
@@ -200,6 +214,7 @@ After editing `config.env`: `airgap/deploy-all.sh dry-run`, then `airgap/deploy-
 | `01`: `helm: cannot execute binary file` on the Mac | `bundle/tools/helm` is a Linux binary; current `env.sh` only puts it on PATH on Linux |
 | `FATAL: missing tool: make` / `envsubst` / `skopeo` | old script versions. The current scripts need only `perl python3 openssl tar`; `kubectl` + `helm` come from `bundle/tools` |
 | `FATAL: config.env still has REPLACE_` | fill that line |
+| `check`: `no Keycloak jar in …/jars` | `bundle/jars/` is empty: download the jar (URL in B4) into it, or rebuild the bundle (A5) |
 | `images` phase: `MISSING <image>` | the tar was not in the bundle → rebuild on the Mac (A5) and rsync again |
 | pod `ErrImagePull` / `ImagePullBackOff` | the image is not on that node. Run `airgap/deploy-all.sh images`. For `@sha256` images (keycloak, busybox, openmeter) also check `kubectl describe pod` shows the exact reference |
 | Keycloak not Ready / init `fetch-providers` fails | the jar server is not up: `kubectl -n tokenfactory get pods -l app.kubernetes.io/name=keycloak-spi` (2 pods Running) and `kubectl -n tokenfactory logs keycloak-0 -c fetch-providers`; fix and `airgap/deploy-all.sh jar`, then delete the Keycloak pod. With your own `KEYCLOAK_JAR_URL`: that URL must answer from inside a pod |
