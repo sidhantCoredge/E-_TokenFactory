@@ -32,9 +32,12 @@ Location: Mac `~/Downloads/ethisalat/config.env`; install VM `~/etisalat/config.
 | `SINGLE_NODE`, `LB_INTERNAL` | `no`, `no` | 1-node lab (1 Postgres instance) / Azure private LBs | – |
 | `STORAGE_CLASS` | – | PVC class | `global.storageClass` |
 | `DOMAIN` | – | creates `api. auth. portal. admin. www.<DOMAIN>` | `global.urls.*` |
-| `SUPPORT_EMAIL`, `PLATFORM_ADMIN_EMAIL` | `support@`/`admin@<DOMAIN>` | sender, super-admin login | `global.supportEmail`, `tf-auth…smtp.from`, `…platformAdminEmail` |
-| `TLS_CERT`, `TLS_KEY` | – | wildcard cert → secret `tf-etisalat-tls` | `tf-gateway-resources.tls.certSecretName` |
-| `SMTP_HOST/PORT/USER/PASSWORD` | – | mail relay | `tf-auth.config.keycloak.smtp.*` |
+| `SUPPORT_EMAIL`, `PLATFORM_ADMIN_EMAIL` | `support@iamsaif.ai` (Resend-verified, as prod) / `admin@<DOMAIN>` | sender, super-admin login | `global.supportEmail`, `tf-auth…smtp.from`, `…platformAdminEmail` |
+| **`BEHIND_CLOUDFLARE`** | `yes` | `yes` = like prod: Cloudflare terminates TLS, **no certificate**, plain HTTP inside, `Cf-Connecting-Ip` trusted (Envoy + warden), Ingress without TLS; `no` = you terminate TLS | `tf-gateway-resources.tls.enabled`, `clientIPHeader`, `tf-warden.trustedClientIPHeader`, `ingress.tls` |
+| **`EXPOSE`** | `clusterip` | `clusterip` = Envoy and ingress Services are ClusterIP (the Cloudflare tunnel reaches them); `loadbalancer` = LoadBalancer Services | `…envoyService.type`, `controller.service.type` |
+| **`INGRESS_TLS`**, `INGRESS_TLS_SECRET` | `yes`, `tf-etisalat-ingress-tls` | `yes` = Ingress `tls:` block from your cert (Xailon style); `no` = plain HTTP Ingress (prod's live one) | `ingress.tls` |
+| `TLS_CERT`, `TLS_KEY` | – | your PEM certificate + key → TLS Secret for the Ingress (and for Envoy when `BEHIND_CLOUDFLARE=no`) | `ingress.tls[].secretName`, `tf-gateway-resources.tls.certSecretName` |
+| `SMTP_HOST/PORT/USER/SSL/STARTTLS/PASSWORD` | Resend as prod: `smtp.resend.com`/`465`/`resend`/`true`/`false` + the Resend API key | mail relay (needs outbound 465 to Resend) | `tf-auth.config.keycloak.smtp.*` |
 | `KEYCLOAK_JAR_URL` | empty | empty = the installer hosts the bundled jar inside the cluster (recommended); or your own internal URL | `keycloak.providers.plugins[0].url` |
 | `CH_DATA_SIZE`, `CH_LOG_SIZE` | `50Gi`, `5Gi` | ClickHouse disks | – |
 | `DOCS_WEB` | `no` | docs site (no Etisalat docs image yet) | `global.brandImages.docs` |

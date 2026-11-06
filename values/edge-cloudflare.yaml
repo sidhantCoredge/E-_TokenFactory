@@ -1,0 +1,9 @@
+# Added when BEHIND_CLOUDFLARE=yes (as tokenfactory-prod / Xailon): Cloudflare reaches the cluster through a tunnel.
+ingress:
+  annotations:
+    ingress.kubernetes.io/ssl-redirect: "false"   # cloudflared may talk plain HTTP to nginx; without this the F5 controller 301s it to https (same as the Xailon overlay)
+tf-gateway-resources:
+  tls: { enabled: false }                  # Envoy (api.) listens on HTTP :8080 only; Cloudflare terminates TLS (developer overlay option (b))
+  clientIPHeader: Cf-Connecting-Ip         # Envoy trusts the real client IP that Cloudflare sets
+tf-warden:
+  trustedClientIPHeader: cf-connecting-ip  # warden reads the same header for IP allowlists (same as tokenfactory-prod)

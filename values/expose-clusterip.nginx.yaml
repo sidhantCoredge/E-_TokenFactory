@@ -1,0 +1,4 @@
+# Added when EXPOSE=clusterip: the ingress controller Service is reached in-cluster (by the Cloudflare tunnel), no LoadBalancer.
+controller:
+  service:
+    type: ClusterIP

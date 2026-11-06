@@ -80,12 +80,12 @@ ls ai-gateway-platform/helm/tokenfactory/templates/ingress.yaml bundle/tars/INDE
 If a tool really is missing on a brand-new VM, install it from the OS media/package mirror of that VM (only `perl`/`python3`/`openssl` are ever needed). `make`, `envsubst` and `skopeo` are NOT needed in the air-gap.
 (Lab only, if the kubeconfig is missing: `az aks get-credentials -g rg-tokenfactory -n aks-etisalat-test --admin --file ~/etisalat.kubeconfig`.)
 
-**B3. TLS certificate.** Lab: make a self-signed wildcard. Real Etisalat: use their cert and key files instead.
+**B3. TLS certificate.** Real Etisalat: use **your own certificate and key** (the files you already have, PEM) — they become the Ingress TLS Secret (Part C). Lab: make a self-signed wildcard instead:
 ```
 openssl req -x509 -newkey rsa:2048 -nodes -days 30 -keyout ~/wild.key -out ~/wild.crt -subj "/CN=*.etisalat.lab" -addext "subjectAltName=DNS:*.etisalat.lab,DNS:etisalat.lab"
 ```
 **B4. Keycloak plugin jar — nothing to download, it is inside the bundle.**
-* **What it is:** `keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar` (Maven Central, `mesutpiskin`) — **exactly the jar tokenfactory-prod and the Xailon PR #678 use**, and it **is valid for Etisalat**: it matches the Keycloak 26.7 line, the Keycloak image in this bundle is **26.7.5** (Xailon runs the same jar on 26.7.4). `tf-auth` needs it (it wires the email-OTP step and refuses to start without it). We do not build it.
+* **What it is:** `keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar` (Maven Central, `mesutpiskin`) — **exactly the jar tokenfactory-prod and the Xailon PR #678 use**, and it **is valid for Etisalat**: it matches the Keycloak 26.7 line, the Keycloak image in this bundle is **26.7.5** (Xailon runs the same jar on 26.7.4). `tf-auth` needs it (it wires the email-OTP step and refuses to start without it). We do not build it. *Pairing rule:* the jar must match the Keycloak version of the chart you deploy. Newer prod values (chart ≥ 0.17.3, Keycloak 26.8.x) use `26.6.1-KC26.8.0`; this package's chart 0.17.2 ships Keycloak **26.7.5**, so `26.5.0-KC26.7.3` is the right one. When you move to a newer chart, take the jar URL from that chart's `values-tf-prod.yaml` (`keycloak.providers.plugins`) and put that file in `bundle/jars/`.
 * **Where it comes from:** step A5 downloads it on the Mac into `bundle/jars/`; the whole `bundle/` folder reaches the VM with A6. It is **not in the git repo** (the repo has no `bundle/`).
 * **Check it on the VM** (size 90807 bytes):
   ```
@@ -100,16 +100,17 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 30 -keyout ~/wild.key -out ~/wil
 * **Your own server instead:** put its URL in `KEYCLOAK_JAR_URL` (it must serve that same file and be reachable from inside a pod); the `jar` phase then does nothing.
 * **After B7** confirm: `kubectl -n tokenfactory get pods -l app.kubernetes.io/name=keycloak-spi` shows 2 pods Running (this in-cluster server has not yet been run on the real cluster — report it if not).
 
-**B5. Edit `config.env`** (`nano config.env`). Set exactly these lines (everything else stays):
+**B5. Edit `config.env`** (`nano config.env`). **Lab** values (the real Etisalat values are in Part C — they differ only where marked):
 ```
 export KUBECONFIG_FILE="/home/azureuser/etisalat.kubeconfig"
 export STORAGE_CLASS="managed-csi"
-export SINGLE_NODE="yes"                      # lab only. Real Etisalat: "no"
-export LB_INTERNAL="yes"                      # Azure only. Real Etisalat: "no"
+export SINGLE_NODE="yes"                      # lab only (1 node)
+export EXPOSE="loadbalancer"  ;  export LB_INTERNAL="yes"      # lab (Azure private LB). Real Etisalat: EXPOSE="clusterip"
+export BEHIND_CLOUDFLARE="no"                                  # lab has no Cloudflare. Real Etisalat: "yes"
 export DOMAIN="etisalat.lab"
-export TLS_CERT="/home/azureuser/wild.crt"
-export TLS_KEY="/home/azureuser/wild.key"
-export SMTP_HOST="smtp.etisalat.lab"          # lab: any name; mails will simply not be delivered
+export TLS_CERT="/home/azureuser/wild.crt"   ;  export TLS_KEY="/home/azureuser/wild.key"      # only because BEHIND_CLOUDFLARE="no"
+export NODE_LOAD_MODE="pod"   ;  export NODES=""               # lab (AKS). Real Etisalat: ssh + the 4 worker IPs
+export SMTP_HOST="smtp.etisalat.lab"          # lab: any name, mails are simply not delivered. Real Etisalat: smtp.resend.com (Part C)
 export SMTP_USER="lab"
 ```
 `TF_TAG` / `BRAND_TAG` are already filled (copied from the Mac). Nothing may still say `REPLACE_`:
@@ -182,13 +183,42 @@ Expected: `branding.sh` passes (brand `etisalat`, product `Token Factory by etis
 
 ---
 ## PART C — Real Etisalat (instead of the lab)
-Same steps, only these differences:
-* B3: use the real wildcard certificate; B5: `SINGLE_NODE="no"`, `LB_INTERNAL="no"`, real `DOMAIN`, `SMTP_*`, `STORAGE_CLASS`, nothing for the Keycloak jar (the installer hosts it in the cluster).
-* Loading images: set in `config.env` **`export NODE_LOAD_MODE="ssh"`** and `export NODES="user@node1 user@node2 user@node3"` (the install VM must reach the nodes over SSH, the user needs passwordless `sudo`). This copies the tars with `scp` and runs `sudo ctr -n k8s.io images import` on each node — **no container image is needed**, so it works in a real air-gap.
-  `pod` mode (the lab default) starts a helper pod and therefore needs an image that is *already on the node* and has `/bin/sh` + `chroot`. The lab got it from AKS's private MCR cache (`mcr.microsoft.com/azurelinux/busybox:1.36`); a real air-gap has no MCR/ACR, so the pod would sit in `ErrImagePull`. Use `pod` mode only if you set `LOADER_DEBUG_IMAGE` to an image that really exists on every node. No SSH to the nodes at all? Copy `bundle/tars` to each node by hand and run on it: `for f in *.tar; do sudo ctr -n k8s.io images import --all-platforms $f; done`.
-* TLS for `api.` — the developer's overlay offers two options: **(a) terminate at the Envoy Gateway** (what this package does: wildcard secret `tf-etisalat-tls`, listener 8443 published on 443) or **(b) terminate at an external load balancer / CDN**: add `tf-gateway-resources: { tls: { enabled: false } }` to `values/umbrella.values.yaml.tmpl` (Envoy then serves plain HTTP on 8080 only) and skip `TLS_CERT/TLS_KEY` for the gateway. The web hosts (portal/admin/www/auth) are always terminated by the NGINX ingress with the same wildcard secret.
-* Keycloak inside the cluster speaks HTTP and HTTPS (`keycloak.config.httpEnabled: true` in the developer's overlay). Flip it to `false` only after every caller is green on HTTPS (add `config: { httpEnabled: false }` under `keycloak:` in the template).
-* Need ≥ 3 Ready nodes, a StorageClass with volume expansion, a LoadBalancer provider (two IPs: Envoy for `api.`, ingress for portal/admin/www/auth).
+**The cluster** (7 VMs on 2 physical hosts) — images are loaded on the 4 workers; Postgres (3), Keycloak (3), Kafka (3) and Envoy (6) spread over them:
+| IP | Name | Role | Host |
+|---|---|---|---|
+| 172.22.100.11 | ed-kca-inf-tf-cn-01 | control (management host) | ED-KCA-INF-TF-CPU-01 |
+| 172.22.100.12 | ed-kca-inf-tf-cn-02 | control (management host) | ED-KCA-INF-TF-CPU-02 |
+| 172.22.100.23 | ed-kca-inf-tf-cn-03 | control node (VM) | ED-KCA-INF-TF-CPU-02 |
+| 172.22.100.24 | ed-kca-inf-tf-cpu-wrk-001 | CPU worker | ED-KCA-INF-TF-CPU-01 |
+| 172.22.100.25 | ed-kca-inf-tf-cpu-wrk-002 | CPU worker | ED-KCA-INF-TF-CPU-01 |
+| 172.22.100.26 | ed-kca-inf-tf-cpu-wrk-003 | CPU worker | ED-KCA-INF-TF-CPU-02 |
+| 172.22.100.27 | ed-kca-inf-tf-cpu-wrk-004 | CPU worker | ED-KCA-INF-TF-CPU-02 |
+Check which nodes accept pods with `kubectl get nodes` and `kubectl describe node <n> | grep Taints`; load images on every node that can run pods (normally only the 4 workers).
+
+**`config.env` for Etisalat** (these are the defaults of the file; fill the rest):
+```
+export NAMESPACE="tokenfactory"
+export SINGLE_NODE="no"
+export BEHIND_CLOUDFLARE="yes"                 # traffic arrives through the Cloudflare tunnel (as tokenfactory-prod / Xailon); Envoy (api.) stays plain HTTP
+export INGRESS_TLS="yes"                       # Ingress gets a tls: block from YOUR cert (Xailon style); "no" = plain HTTP Ingress (like prod)
+export INGRESS_TLS_SECRET="tf-etisalat-ingress-tls"
+export TLS_CERT="/path/etisalat.crt"  ;  export TLS_KEY="/path/etisalat.key"      # PEM; must cover portal./admin./www./auth.<DOMAIN>
+export EXPOSE="clusterip"                      # Envoy + ingress are ClusterIP; the Cloudflare tunnel reaches them inside the cluster
+export DOMAIN="<the domain served through Cloudflare>"
+export NODE_LOAD_MODE="ssh"
+export NODES="<ssh-user>@172.22.100.24 <ssh-user>@172.22.100.25 <ssh-user>@172.22.100.26 <ssh-user>@172.22.100.27"
+export STORAGE_CLASS="<storageclass with volume expansion>"
+export SMTP_HOST="smtp.resend.com" ; export SMTP_PORT="465" ; export SMTP_USER="resend" ; export SMTP_SSL="true" ; export SMTP_STARTTLS="false"
+export SMTP_PASSWORD="<the Resend API key>"    # same value tokenfactory-prod keeps in Vault as smtp-password
+export SUPPORT_EMAIL="support@iamsaif.ai"      # the Resend-verified sender (as prod)
+```
+* **SMTP = the same as `tokenfactory-prod` (Resend).** Resend is on the Internet: the Keycloak and tf-accounts pods need **outbound tcp/465 to `smtp.resend.com`** (and https to `api.resend.com`). Open it on the firewall for the worker network; without it sign-up/OTP/reset mails are not delivered (everything else works). If Etisalat prefers an internal relay: put its host/port in `SMTP_*` and set `SMTP_SSL`/`SMTP_STARTTLS` to what it speaks.
+* **Loading images:** `ssh` mode (copy + `ctr import`, no container image needed). The install VM needs SSH to the 4 workers and the user needs passwordless `sudo`. No SSH at all? Copy `bundle/tars/` to each worker by hand and on every node run `for f in *.tar; do sudo ctr -n k8s.io images import --all-platforms $f; done`, then run B7 without the `images` phase. `pod` mode is lab-only (needs an image already on the node).
+* **Ingress TLS from your certificate and key (as in the Xailon overlay):** `check` verifies the files exist, the certificate is not expired and the key belongs to it. The `ns` phase creates the Secret `tf-etisalat-ingress-tls` in namespace `tokenfactory` from `TLS_CERT`/`TLS_KEY` (`kubectl create secret tls …`), and the rendered Ingress gets `tls: [{ secretName: tf-etisalat-ingress-tls, hosts: [portal., admin., www., auth.<DOMAIN>] }]`. Ports 80 **and** 443 answer; with `BEHIND_CLOUDFLARE="yes"` the annotation `ingress.kubernetes.io/ssl-redirect: "false"` is set (as Xailon), so the tunnel may talk to nginx over plain HTTP :80 or over HTTPS :443. Without that tls block the F5 controller would answer with its own self-signed default certificate. Verify after B7: `kubectl -n tokenfactory get secret tf-etisalat-ingress-tls` and `kubectl -n tokenfactory get ingress tokenfactory -o jsonpath='{.spec.tls}'`.
+* **Envoy (`api.`) and `BEHIND_CLOUDFLARE`:** `"yes"` = Envoy listens on plain HTTP :8080 (Cloudflare terminates TLS for api.), makes Envoy and warden trust `Cf-Connecting-Ip`; with `EXPOSE="clusterip"` there is no LoadBalancer at all. If you ever have **no** Cloudflare: `BEHIND_CLOUDFLARE="no"` (Envoy then also terminates TLS with the same cert, Secret `tf-etisalat-tls`) and `EXPOSE="loadbalancer"` (needs MetalLB/F5). `INGRESS_TLS="no"` gives a plain-HTTP Ingress like tokenfactory-prod's live one (no certificate needed).
+* **Keycloak jar:** nothing to host (Part B4). **MinIO tar:** Etisalat has no ACR, so build it with `docker save` on a host that has the image (A7).
+* The Etisalat-branded `tf-docs-web` build is still missing (`DOCS_WEB="no"`); ask the developer. Keycloak's internal HTTP/HTTPS: `keycloak.config.httpEnabled` stays `true`; flip it only after all callers are green on HTTPS.
+* Need: ≥ 3 schedulable nodes (you have 4 workers), a StorageClass with volume expansion, outbound 465 to Resend (above), the Cloudflare tunnel (Part M).
 
 ## PART D — Sizing and HA: all in `config.env` (section "SIZING & HA")
 Layout is the same as `tokenfactory-prod`: **`tokenfactory`** = everything of TokenFactory incl. the Postgres cluster `pgdb`; **`postgres`** = Zalando operator only; **`openmeter`** = OpenMeter.
@@ -435,6 +465,18 @@ Afterwards every running image must come from the registry: `kubectl get pods -A
 | `02-push-registry.sh`: `unauthorized` / `project not found` | create the project (L1) and check the robot has **push** |
 | `02-push-registry.sh`: `INDEX has no path column` | the bundle was built by an older `01`; re-run `airgap/01-bundle-connected.sh` on the Mac (finished tars are skipped) and copy it again |
 | pod `ErrImagePull` on `@sha256` images only | they were pushed by something other than this script; re-run `airgap/deploy-all.sh images` |
+
+## PART M — Cloudflare tunnel (how traffic reaches TokenFactory, same as `tokenfactory-prod`)
+Cloudflare terminates TLS and forwards plain HTTP through a `cloudflared` tunnel. **`cloudflared` is not part of this package or of the chart** (in prod it is "an out-of-band in-cluster install"); Etisalat installs it the same way as prod, with the public hostnames mapped to in-cluster Services. The tunnel pods need outbound access to Cloudflare. After `deploy-all.sh all`, the `verify` phase prints the exact targets; typically:
+| Public hostname (Cloudflare) | Service URL for the tunnel | What answers |
+|---|---|---|
+| `api.<DOMAIN>` | `http://<envoy-service>.tokenfactory.svc.cluster.local:8080` | Envoy AI Gateway (inference API) |
+| `portal.<DOMAIN>`, `admin.<DOMAIN>`, `www.<DOMAIN>`, `auth.<DOMAIN>` | `http://nginx-ingress-controller.nginx-ingress.svc.cluster.local:80` | NGINX Ingress → `tf-portal-web`, `tf-admin-web`, `tf-site-web`, `keycloak-edge` (routes by host name; the tunnel must keep the original `Host`, which is cloudflared's default) |
+Find the Envoy Service name: `kubectl -n tokenfactory get svc -l gateway.envoyproxy.io/owning-gateway-name=envoy`. (tokenfactory-prod maps each hostname straight to its Service, e.g. `www` → `tf-site-web:80`; mapping the four web hostnames to the ingress instead is equivalent and keeps the host routing in the chart.)
+**With Ingress TLS** (default here) the portal/admin/www/auth targets can also be `https://nginx-ingress-controller.nginx-ingress.svc.cluster.local:443` (set the tunnel's `noTLSVerify` or `originServerName` because the in-cluster name is not in your certificate, and use Cloudflare SSL mode *Full*/*Full (strict)*); the plain `http://…:80` targets above keep working because the redirect is off.
+Checks after the tunnel is up: `curl -s -o /dev/null -w '%{http_code}\n' https://portal.<DOMAIN>/` → 200; `curl -s https://auth.<DOMAIN>/auth/realms/master/.well-known/openid-configuration | grep -o '"issuer":"[^"]*"'` → `https://auth.<DOMAIN>/auth/realms/master`; `curl -s -o /dev/null -w '%{http_code}\n' https://api.<DOMAIN>/v1/models` → 401 without a key.
+**`api.<DOMAIN>`** goes straight to Envoy over HTTP :8080 (like Xailon, where `api.` bypasses nginx).
+The real client IP comes from Cloudflare's `Cf-Connecting-Ip` header, which is only trustworthy while Cloudflare is the **only** way into Envoy — do not expose the Envoy or ingress Services any other way (no NodePort/LoadBalancer) while `BEHIND_CLOUDFLARE="yes"`.
 
 ## What was verified in the lab (5 Nov 2026)
 Run on `aks-etisalat-test` (1 node, no internet) exactly as above: all 38 images loaded from tars (`ALL 38 IMAGES PRESENT`), Postgres Patroni leader Running, Keycloak 3/3 with one Infinispan cluster of 3 members, 3× Envoy, all tf-* services Ready, OpenMeter (Kafka 3, API 2, ClickHouse, Redis) Running; `www`, `portal`, `admin` → HTTP 200 through the NGINX ingress, Keycloak issuer `https://auth.etisalat.lab/auth/realms/master`, `api` via Envoy → 401 without a key (correct). Digest-pinned images (`@sha256`) start from the node tars.

@@ -53,7 +53,7 @@ ingress:
     nginx.org/proxy-read-timeout: 600s
     nginx.org/proxy-send-timeout: 600s
   tls:
-    - secretName: tf-etisalat-tls
+    - secretName: ${INGRESS_TLS_SECRET}
       hosts: [ "portal.${DOMAIN}", "admin.${DOMAIN}", "www.${DOMAIN}", "auth.${DOMAIN}" ]
   hosts:
     - { host: "www.${DOMAIN}",    service: tf-site-web,   port: 80 }
@@ -95,6 +95,9 @@ tf-auth:
         port: ${SMTP_PORT}
         user: "${SMTP_USER}"
         from: "${SUPPORT_EMAIL}"
+        auth: true
+        ssl: ${SMTP_SSL}
+        starttls: ${SMTP_STARTTLS}
 
 keycloak:                                       # Keycloak HA
   replicaCount: ${KEYCLOAK_REPLICAS}                               # S3  (config.env KEYCLOAK_REPLICAS)

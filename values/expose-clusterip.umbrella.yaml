@@ -1,0 +1,8 @@
+# Added when EXPOSE=clusterip (on-prem VMs without a cloud load balancer; the Cloudflare tunnel pods reach Services in-cluster).
+tf-gateway-resources:
+  envoyProxy:
+    spec:
+      provider:
+        kubernetes:
+          envoyService:
+            type: ClusterIP
