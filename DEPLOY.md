@@ -141,7 +141,7 @@ curl -sk --resolve auth.etisalat.lab:443:$ING https://auth.etisalat.lab/auth/rea
 ```
 Admin login: user = `admin@etisalat.lab`, password:
 ```
-kubectl -n tokenfactory-etisalat get secret tokenfactory-secrets -o jsonpath='{.data.platform-admin-password}' | base64 -d; echo
+kubectl -n tokenfactory get secret tokenfactory-secrets -o jsonpath='{.data.platform-admin-password}' | base64 -d; echo
 ```
 Real Etisalat: create DNS records instead (`api.<domain>` → Envoy IP, `portal. admin. www. auth.<domain>` → ingress IP).
 
@@ -149,12 +149,12 @@ Real Etisalat: create DNS records instead (`api.<domain>` → Envoy IP, `portal.
 ```
 export KUBECONFIG=~/etisalat.kubeconfig
 kubectl get pods -A | grep -v -E 'Running|Completed'          # nothing important should be listed
-kubectl -n tokenfactory-etisalat get postgresql pgdb          # Running
-kubectl -n tokenfactory-etisalat get sts keycloak             # READY 3/3
-kubectl -n tokenfactory-etisalat get ingress tokenfactory
+kubectl -n tokenfactory get postgresql pgdb          # Running
+kubectl -n tokenfactory get sts keycloak             # READY 3/3
+kubectl -n tokenfactory get ingress tokenfactory
 ```
 
-**B10. Etisalat brand + feature gate** (the verification the developer's overlay asks for). The scripts are in the repo copy; they need `curl` and `python3`, and they read the release `tokenfactory` in namespace `tokenfactory-etisalat`. The lab has no DNS, so first map the names on this VM (real Etisalat: DNS exists, skip these two lines):
+**B10. Etisalat brand + feature gate** (the verification the developer's overlay asks for). The scripts are in the repo copy; they need `curl` and `python3`, and they read the release `tokenfactory` in namespace `tokenfactory`. The lab has no DNS, so first map the names on this VM (real Etisalat: DNS exists, skip these two lines):
 ```
 echo "<INGRESS_IP> portal.etisalat.lab admin.etisalat.lab www.etisalat.lab auth.etisalat.lab" | sudo tee -a /etc/hosts      # lab: 10.40.16.7
 echo "<ENVOY_IP>   api.etisalat.lab" | sudo tee -a /etc/hosts                                                             # lab: 10.40.16.8
@@ -163,11 +163,11 @@ then (replace `<domain>` by your `DOMAIN`):
 ```
 export KUBECONFIG=~/etisalat.kubeconfig; export PATH=~/etisalat/bundle/tools:$PATH
 cd ~/etisalat/ai-gateway-platform/test/e2e
-KC=kubectl NS=tokenfactory-etisalat PORTAL_URL=https://portal.<domain> ADMIN_URL=https://admin.<domain> \
+KC=kubectl NS=tokenfactory PORTAL_URL=https://portal.<domain> ADMIN_URL=https://admin.<domain> \
   SITE_URL=https://www.<domain> DOCS_URL=https://www.<domain>/docs \
   EXPECT_PRODUCT='Token Factory by etisalat' EXPECT_FAVICON=favicon.png \
   EXPECT_THEME_POLICY=both EXPECT_DARK_TOKENS=yes EXPECT_SIGNUP=yes ./branding.sh
-KC=kubectl NS=tokenfactory-etisalat PORTAL_URL=https://portal.<domain> SITE_URL=https://www.<domain> ./features.sh
+KC=kubectl NS=tokenfactory PORTAL_URL=https://portal.<domain> SITE_URL=https://www.<domain> ./features.sh
 ```
 Expected: `branding.sh` passes (brand `etisalat`, product `Token Factory by etisalat`, Etisalat Keycloak theme, light+dark). `features.sh` must show **`auth.socialLogin` and `billing.topup` OFF** (HTTP 404 `feature_disabled`) and **`auth.signup` ON** — that is the Etisalat feature ceiling from the brand package, not a bug. With the lab's self-signed certificate the scripts' `curl` needs `-k`; if a check fails only for that reason, note it and move on. In the lab the `docs` check fails by design (`DOCS_WEB=no`, no Etisalat docs image).
 
@@ -204,10 +204,10 @@ After editing run only what changed, e.g. `airgap/deploy-all.sh render app`.
 | `FATAL: config.env still has REPLACE_` | fill that line |
 | `images` phase: `MISSING <image>` | the tar was not in the bundle → rebuild on the Mac (A5) and rsync again |
 | pod `ErrImagePull` / `ImagePullBackOff` | the image is not on that node. Run `airgap/deploy-all.sh images`. For `@sha256` images (keycloak, busybox, openmeter) also check `kubectl describe pod` shows the exact reference |
-| Keycloak not Ready | jar server (B4) stopped → restart B4; check `kubectl -n tokenfactory-etisalat logs keycloak-0 -c fetch-providers` |
-| `pg` phase stuck | `kubectl -n tokenfactory-etisalat describe postgresql pgdb`; on a 1-node cluster SINGLE_NODE must be `yes` |
+| Keycloak not Ready | jar server (B4) stopped → restart B4; check `kubectl -n tokenfactory logs keycloak-0 -c fetch-providers` |
+| `pg` phase stuck | `kubectl -n tokenfactory describe postgresql pgdb`; on a 1-node cluster SINGLE_NODE must be `yes` |
 | `tf-accounts` stuck in `Init:ErrImagePull` on `tf-docs-web` | the docs image tar is missing on the node (its init container `legal-src` copies the legal pages out of it). `airgap/deploy-all.sh images`, then delete the pod |
-| `tf-ledger` CrashLoop: `Dirty database version N` | a pod was killed in the middle of a DB migration. Lab-safe fix: undo that one migration and let it re-run, e.g. for 5: `kubectl -n tokenfactory-etisalat exec pgdb-0 -c postgres -- psql -U postgres -d tokenfactory -c "BEGIN; DROP TABLE IF EXISTS tf_credit_grants; UPDATE tf_ledger_schema_migrations SET version=4, dirty=false; COMMIT;"` then delete the tf-ledger pod. Do not delete pods while a first start is migrating |
+| `tf-ledger` CrashLoop: `Dirty database version N` | a pod was killed in the middle of a DB migration. Lab-safe fix: undo that one migration and let it re-run, e.g. for 5: `kubectl -n tokenfactory exec pgdb-0 -c postgres -- psql -U postgres -d tokenfactory -c "BEGIN; DROP TABLE IF EXISTS tf_credit_grants; UPDATE tf_ledger_schema_migrations SET version=4, dirty=false; COMMIT;"` then delete the tf-ledger pod. Do not delete pods while a first start is migrating |
 | `app` phase: `HARD BLOCKERS` from preflight | not used any more: `preflight.sh`'s OpenMeter probe runs in the `openmeter` namespace and OpenMeter's NetworkPolicy (Cilium) blocks it, so it can never pass. `deploy-all.sh` runs its own checks and calls install.sh with `SKIP_PREFLIGHT=1` |
 | `openmeter-billing-*-invoices-…` pods in `Error` | the first cron runs fired before OpenMeter finished starting; later runs show `Completed`. Ignore |
 | ssh session dies when you start/stop the jar server | never `pkill -f 'http.server …'` — the pattern also matches your own shell. Start with `(setsid nohup … &)`, stop by port (see Part F) |
@@ -283,8 +283,8 @@ nano ~/etisalat/values/umbrella.values.yaml.tmpl # anything else for the app (in
 cd ~/etisalat
 airgap/deploy-all.sh dry-run                     # must end with "dry-run PASSED"
 airgap/deploy-all.sh render app                  # applies the app change (helm upgrade)
-kubectl -n tokenfactory-etisalat get pods        # check
-helm -n tokenfactory-etisalat history tokenfactory      # every change is a revision; undo with: helm -n tokenfactory-etisalat rollback tokenfactory <revision>
+kubectl -n tokenfactory get pods        # check
+helm -n tokenfactory history tokenfactory      # every change is a revision; undo with: helm -n tokenfactory rollback tokenfactory <revision>
 ```
 Which phase applies which file:
 | You changed | Run |
@@ -307,14 +307,14 @@ The block has four parts: `className`, `annotations`, `tls`, `hosts`. Rules that
 | Send `auth.` straight to Keycloak | `ingress.hosts` line for `auth.`: `service: keycloak` instead of `keycloak-edge` (edge = nginx in the portal pods that turns a Keycloak 502/504 into the "sign-in unavailable" page) |
 | Different ingress controller | change `className`; the `nginx.org/*` annotations only work with the F5 controller — community ingress-nginx needs its own `nginx.ingress.kubernetes.io/*` equivalents (`proxy-body-size`, `proxy-buffer-size`, `proxy-read-timeout`) |
 | Etisalat has its own ingress/LB | `ingress.enabled: false`, and route the 4 hosts yourself to Services `tf-portal-web:80`, `tf-admin-web:80`, `tf-site-web:80`, `keycloak-edge:80` (or `keycloak:80`) |
-| Replace the TLS certificate | `kubectl -n tokenfactory-etisalat create secret tls tf-etisalat-tls --cert=new.crt --key=new.key --dry-run=client -o yaml \| kubectl apply -f -` (or set `TLS_CERT/TLS_KEY` and run `deploy-all.sh ns`); the controller and Envoy reload it by themselves, no pod restart |
-After any Ingress edit: `kubectl -n tokenfactory-etisalat get ingress tokenfactory -o yaml` (hosts, tls, annotations), then `curl -sk --resolve portal.<domain>:443:<ingress-ip> https://portal.<domain>/ -o /dev/null -w '%{http_code}\n'`. If a host answers with nginx's own self-signed certificate, the TLS secret name or the host in `tls.hosts` does not match.
+| Replace the TLS certificate | `kubectl -n tokenfactory create secret tls tf-etisalat-tls --cert=new.crt --key=new.key --dry-run=client -o yaml \| kubectl apply -f -` (or set `TLS_CERT/TLS_KEY` and run `deploy-all.sh ns`); the controller and Envoy reload it by themselves, no pod restart |
+After any Ingress edit: `kubectl -n tokenfactory get ingress tokenfactory -o yaml` (hosts, tls, annotations), then `curl -sk --resolve portal.<domain>:443:<ingress-ip> https://portal.<domain>/ -o /dev/null -w '%{http_code}\n'`. If a host answers with nginx's own self-signed certificate, the TLS secret name or the host in `tls.hosts` does not match.
 
 ### J2. Other common changes
 | Change | Where / how |
 |---|---|
 | SMTP relay (or its SSL mode) | `config.env` `SMTP_*`; SSL/STARTTLS: add under `tf-auth.config.keycloak.smtp` in the template `ssl: true` / `starttls: false` (prod used port 465 + ssl) |
-| SMTP password / Stripe or Google keys later | they live in Secret `tokenfactory-secrets`: `kubectl -n tokenfactory-etisalat patch secret tokenfactory-secrets -p '{"stringData":{"smtp-password":"NEW"}}'` then `kubectl -n tokenfactory-etisalat rollout restart deploy/tf-auth deploy/tf-accounts` and `rollout restart sts/keycloak` (the chart cannot detect a change inside an existing Secret) |
+| SMTP password / Stripe or Google keys later | they live in Secret `tokenfactory-secrets`: `kubectl -n tokenfactory patch secret tokenfactory-secrets -p '{"stringData":{"smtp-password":"NEW"}}'` then `kubectl -n tokenfactory rollout restart deploy/tf-auth deploy/tf-accounts` and `rollout restart sts/keycloak` (the chart cannot detect a change inside an existing Secret) |
 | Replicas / CPU / RAM of a service | template: `tf-relay: { replicas: 3, resources: … }` etc. (Part D lists every block) |
 | Keycloak replicas, RAM, heap | template `keycloak:` — keep `-Xmx` at ½–¾ of `limits.memory` |
 | New image version | rebuild bundle with new `TF_TAG` (Part A), copy, then `airgap/deploy-all.sh images render app` |

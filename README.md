@@ -1,6 +1,6 @@
 # E-_TokenFactory — TokenFactory for Etisalat (air-gapped, HA)
 
-Deployment package for `tokenfactory` in namespace `tokenfactory-etisalat`: HA Postgres (Zalando), HA Keycloak,
+Deployment package for `tokenfactory` in namespace `tokenfactory`: HA Postgres (Zalando), HA Keycloak,
 NGINX Ingress, Envoy AI Gateway, OpenMeter — installed offline from one image/chart bundle.
 
 Start with **[DEPLOY.md](DEPLOY.md)**. Site values: `config.env` (placeholders `REPLACE_*`, no secrets). Sizing: `values/` and `zalando/charts/*/values.yaml`.

@@ -98,6 +98,6 @@ airgap/deploy-all.sh render ns app           # config.env or umbrella.values.yam
 | `values/envoy-gateway…` / `ai-gateway…` | `airgap/deploy-all.sh render controllers` |
 | `TF_TAG` / `BRAND_TAG` | rebuild the bundle on the Mac (`DEPLOY.md` Part A), copy it, then `airgap/deploy-all.sh images render app` |
 
-Undo any app change: `helm -n tokenfactory-etisalat history tokenfactory`, then `helm -n tokenfactory-etisalat rollback tokenfactory <revision>`.
+Undo any app change: `helm -n tokenfactory history tokenfactory`, then `helm -n tokenfactory rollback tokenfactory <revision>`.
 
 Line numbers drift when someone edits the files; the key names (`ingress:`, `keycloak:`, `tf-relay:` …) are the reliable anchors — search for them.

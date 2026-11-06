@@ -1,6 +1,6 @@
 # Etisalat air-gapped TokenFactory — lab run summary (5 Nov 2026)
 
-A sample TokenFactory is **up in namespace `tokenfactory-etisalat`** on the isolated single-node AKS lab `aks-etisalat-test` (no internet, no registry). It was deployed by following `DEPLOY.md` from the beginning; every problem found on the way was fixed in the scripts and written into `DEPLOY.md` (Parts E, G, H).
+A sample TokenFactory is **up in namespace `tokenfactory`** on the isolated single-node AKS lab `aks-etisalat-test` (no internet, no registry). It was deployed by following `DEPLOY.md` from the beginning; every problem found on the way was fixed in the scripts and written into `DEPLOY.md` (Parts E, G, H).
 
 ## What is running
 | Area | State |
