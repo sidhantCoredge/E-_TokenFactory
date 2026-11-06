@@ -113,6 +113,14 @@ airgap/deploy-all.sh dry-run
 ```
 Must end with `dry-run PASSED`. If it stops with a FATAL line, fix what it says and re-run.
 
+**B6b. Choose how the images reach the nodes** (set it in `config.env` **before** B7 — the `images` phase of B7 uses it):
+| Where | Set in `config.env` | What happens |
+|---|---|---|
+| **Real Etisalat air-gap (use this)** | `export NODE_LOAD_MODE="ssh"`<br>`export NODES="user@node1 user@node2 user@node3"` | the VM copies the tars to each node with `scp` and runs `sudo ctr -n k8s.io images import` there. Needs **SSH from the install VM to every node + passwordless `sudo`**. **No container image is needed**, so it works with zero internet and zero registry |
+| Real Etisalat, **no SSH to the nodes** | `export NODE_LOAD_MODE="ssh"` is not possible → load by hand | copy `bundle/tars/` to each node (USB / scp from anywhere) and on **every node** run: `cd <folder-with-tars> && for f in *.tar; do sudo ctr -n k8s.io images import --all-platforms $f; done`. Then run B7 **without** the `images` phase: `airgap/deploy-all.sh check prepare render ns pg secrets controllers ingress openmeter app verify` (everything except `images`) |
+| AKS lab only | `export NODE_LOAD_MODE="pod"` (default) | a privileged helper pod does the import. It needs an image that is *already on the node* with `/bin/sh` + `chroot`; the lab got it from AKS's private MCR cache — a real air-gap would end in `ErrImagePull` |
+Check on a node afterwards (any mode): `sudo ctr -n k8s.io images ls -q | grep -c registry.etisalat.local` must print **38** (the `images` phase also prints `ALL 38 IMAGES PRESENT` by itself in `ssh`/`pod` mode).
+
 **B7. Deploy everything (one command)**
 ```
 airgap/deploy-all.sh all 2>&1 | tee ~/etisalat-deploy.log
@@ -167,9 +175,8 @@ Expected: `branding.sh` passes (brand `etisalat`, product `Token Factory by etis
 ## PART C — Real Etisalat (instead of the lab)
 Same steps, only these differences:
 * B3: use the real wildcard certificate; B5: `SINGLE_NODE="no"`, `LB_INTERNAL="no"`, real `DOMAIN`, `SMTP_*`, `STORAGE_CLASS`, a jar URL on an internal web server (or the install VM itself, as in B4).
-* Loading images: nodes usually have SSH, so set in `config.env`:
-  `export NODE_LOAD_MODE="ssh"` and `export NODES="user@node1 user@node2 user@node3"` (passwordless sudo on each node). Or `pod` mode if SSH is not allowed.
-* Etisalat has no ACR (and no jumphost): do A7 with `docker save` of MinIO from any host that has the image, and ask the developer for the Etisalat-branded `tf-docs-web` build (then set `DOCS_WEB=yes` and change its line in `airgap/images.txt` to `${BRAND_TAG}`).
+* Loading images: set in `config.env` **`export NODE_LOAD_MODE="ssh"`** and `export NODES="user@node1 user@node2 user@node3"` (the install VM must reach the nodes over SSH, the user needs passwordless `sudo`). This copies the tars with `scp` and runs `sudo ctr -n k8s.io images import` on each node — **no container image is needed**, so it works in a real air-gap.
+  `pod` mode (the lab default) starts a helper pod and therefore needs an image that is *already on the node* and has `/bin/sh` + `chroot`. The lab got it from AKS's private MCR cache (`mcr.microsoft.com/azurelinux/busybox:1.36`); a real air-gap has no MCR/ACR, so the pod would sit in `ErrImagePull`. Use `pod` mode only if you set `LOADER_DEBUG_IMAGE` to an image that really exists on every node. No SSH to the nodes at all? Copy `bundle/tars` to each node by hand and run on it: `for f in *.tar; do sudo ctr -n k8s.io images import --all-platforms $f; done`.
 * TLS for `api.` — the developer's overlay offers two options: **(a) terminate at the Envoy Gateway** (what this package does: wildcard secret `tf-etisalat-tls`, listener 8443 published on 443) or **(b) terminate at an external load balancer / CDN**: add `tf-gateway-resources: { tls: { enabled: false } }` to `values/umbrella.values.yaml.tmpl` (Envoy then serves plain HTTP on 8080 only) and skip `TLS_CERT/TLS_KEY` for the gateway. The web hosts (portal/admin/www/auth) are always terminated by the NGINX ingress with the same wildcard secret.
 * Keycloak inside the cluster speaks HTTP and HTTPS (`keycloak.config.httpEnabled: true` in the developer's overlay). Flip it to `false` only after every caller is green on HTTPS (add `config: { httpEnabled: false }` under `keycloak:` in the template).
 * Need ≥ 3 Ready nodes, a StorageClass with volume expansion, a LoadBalancer provider (two IPs: Envoy for `api.`, ingress for portal/admin/www/auth).
