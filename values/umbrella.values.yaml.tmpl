@@ -44,7 +44,7 @@ global:
 ingress:
   enabled: ${INGRESS_ENABLED}
   name: tokenfactory
-  className: nginx
+  className: ${INGRESS_CLASS}
   annotations:
     nginx.org/client-max-body-size: 128m
     nginx.org/proxy-buffer-size: 16k          # OIDC-callback 502 fix
@@ -52,6 +52,13 @@ ingress:
     nginx.org/proxy-connect-timeout: 75s
     nginx.org/proxy-read-timeout: 600s
     nginx.org/proxy-send-timeout: 600s
+    # the same settings for the community ingress-nginx controller (each controller ignores the other's annotations):
+    nginx.ingress.kubernetes.io/proxy-body-size: 128m
+    nginx.ingress.kubernetes.io/proxy-buffer-size: 16k
+    nginx.ingress.kubernetes.io/proxy-buffers-number: "8"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "75"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
   tls:
     - secretName: ${INGRESS_TLS_SECRET}
       hosts: [ "portal.${DOMAIN}", "admin.${DOMAIN}", "www.${DOMAIN}", "auth.${DOMAIN}" ]

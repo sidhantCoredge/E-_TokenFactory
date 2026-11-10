@@ -62,21 +62,21 @@ rsync -avP --exclude .git --exclude Real-values-of-tf-prod.yaml <this package fo
 Run everything below **on the install VM**, as the user that owns `~/etisalat`. Lab differences (Azure jumphost, 1 node) are in Part B-LAB at the end of this part.
 
 ### B0. The cluster this package targets
-**The cluster** (7 VMs on 2 physical hosts) — images are loaded on the 4 workers; Postgres (3), Keycloak (3), Kafka (3) and Envoy (6) spread over them:
-| IP | Name | Role | Host |
-|---|---|---|---|
-| 172.22.100.11 | ed-kca-inf-tf-cn-01 | control (management host) | ED-KCA-INF-TF-CPU-01 |
-| 172.22.100.12 | ed-kca-inf-tf-cn-02 | control (management host) | ED-KCA-INF-TF-CPU-02 |
-| 172.22.100.23 | ed-kca-inf-tf-cn-03 | control node (VM) | ED-KCA-INF-TF-CPU-02 |
-| 172.22.100.24 | ed-kca-inf-tf-cpu-wrk-001 | CPU worker | ED-KCA-INF-TF-CPU-01 |
-| 172.22.100.25 | ed-kca-inf-tf-cpu-wrk-002 | CPU worker | ED-KCA-INF-TF-CPU-01 |
-| 172.22.100.26 | ed-kca-inf-tf-cpu-wrk-003 | CPU worker | ED-KCA-INF-TF-CPU-02 |
-| 172.22.100.27 | ed-kca-inf-tf-cpu-wrk-004 | CPU worker | ED-KCA-INF-TF-CPU-02 |
+**The cluster** (7 VMs; subnet `172.22.100.0/22`, gateway `172.22.100.254`). Kubernetes API VIP **`172.22.100.240`** (the `server:` of the kubeconfig). **MetalLB pool `172.22.100.241-250`**; the cluster's **Ingress-NGINX controller is already running on `172.22.100.241`**. Images are loaded on the 4 workers; Postgres (3), Keycloak (3), Kafka (3) and Envoy (6) spread over them:
+| IP | Name | Role |
+|---|---|---|
+| 172.22.100.21 | ed-kca-inf-tf-cn-01 | master-1 (control plane) |
+| 172.22.100.22 | ed-kca-inf-tf-cn-02 | master-2 (control plane) |
+| 172.22.100.23 | ed-kca-inf-tf-cn-03 | master-3 (control plane) |
+| 172.22.100.24 | ed-kca-inf-tf-cpu-wrk-001 | worker-1 |
+| 172.22.100.25 | ed-kca-inf-tf-cpu-wrk-002 | worker-2 |
+| 172.22.100.26 | ed-kca-inf-tf-cpu-wrk-003 | worker-3 |
+| 172.22.100.27 | ed-kca-inf-tf-cpu-wrk-004 | worker-4 |
 Check which nodes accept pods with `kubectl get nodes` and `kubectl describe node <n> | grep Taints`; load images on every node that can run pods (normally only the 4 workers).
 
-* Needed from Etisalat before you start: the cluster admin kubeconfig, SSH access from the install VM to the 4 workers with passwordless `sudo`, a StorageClass that allows volume expansion, the TLS certificate + key (PEM) that cover `portal. admin. www. auth.<DOMAIN>`, the Resend API key (`SMTP_PASSWORD`), and the Cloudflare tunnel (Part M).
+* Needed from Etisalat before you start: the cluster admin kubeconfig, SSH access from the install VM to the 4 workers with passwordless `sudo`, a StorageClass that allows volume expansion, the TLS certificate + key (PEM) that cover `portal. admin. www. auth. api.<DOMAIN>` (wildcard), the Resend API key (`SMTP_PASSWORD`), and the DNS names of B8.
 * **Firewall (outbound from the workers):** `tcp/465` to `smtp.resend.com` (mail) and `https` to `api.resend.com`. Nothing else leaves the cluster: GeoIP downloads are off, Persona KYC is off, no image is ever pulled from the Internet (images are loaded from the tars).
-* **Inbound:** only the Cloudflare tunnel (`cloudflared` inside the cluster, Part M) reaches the Envoy and ingress Services. Do not expose them any other way.
+* **Traffic path: MetalLB direct (no Cloudflare).** `portal. admin. www. auth.<DOMAIN>` → the existing Ingress-NGINX on `172.22.100.241`; `api.<DOMAIN>` → Envoy on `172.22.100.242` (`ENVOY_LB_IP`, a free IP of the pool `172.22.100.241-250`). Envoy terminates TLS itself, so the certificate must also cover `api.<DOMAIN>` (a wildcard `*.<DOMAIN>` does). Create the DNS records in B8. (A Cloudflare tunnel is optional and not used: Part M.)
 
 ### B1. Log in and enter the package
 ```
@@ -91,7 +91,10 @@ ls ai-gateway-platform/helm/tokenfactory/templates/ingress.yaml bundle/tars/INDE
 ls bundle/tars/*.tar | wc -l                      # must print 38
 cp <path-of-the-cluster-admin-kubeconfig> ~/etisalat.kubeconfig && chmod 600 ~/etisalat.kubeconfig
 export PATH=~/etisalat/bundle/tools:$PATH
-kubectl --kubeconfig ~/etisalat.kubeconfig get nodes -o wide        # all nodes Ready; note the 4 worker names/IPs
+kubectl --kubeconfig ~/etisalat.kubeconfig get nodes -o wide        # all 7 Ready (3 masters .21-.23, 4 workers .24-.27); the API answers on the VIP 172.22.100.240
+kubectl --kubeconfig ~/etisalat.kubeconfig get ingressclass           # the existing controller's class (INGRESS_CLASS in config.env)
+kubectl --kubeconfig ~/etisalat.kubeconfig get svc -A | grep -i ingress        # its Service: EXTERNAL-IP 172.22.100.241 (MetalLB)
+kubectl --kubeconfig ~/etisalat.kubeconfig -n metallb-system get ipaddresspool 2>/dev/null       # pool 172.22.100.241-250
 kubectl --kubeconfig ~/etisalat.kubeconfig get nodes --no-headers | grep -c ' Ready'      # >= 3
 kubectl --kubeconfig ~/etisalat.kubeconfig get sc                    # pick the StorageClass for STORAGE_CLASS
 kubectl --kubeconfig ~/etisalat.kubeconfig get sc <name> -o jsonpath='{.allowVolumeExpansion}{"\n"}'      # must print true
@@ -110,7 +113,7 @@ Your own files (PEM, certificate chain first): copy them to the VM and verify be
 ```
 mkdir -p ~/etisalat-tls && cp <etisalat.crt> ~/etisalat-tls/tls.crt && cp <etisalat.key> ~/etisalat-tls/tls.key && chmod 600 ~/etisalat-tls/tls.key
 openssl x509 -in ~/etisalat-tls/tls.crt -noout -subject -enddate                         # not expired
-openssl x509 -in ~/etisalat-tls/tls.crt -noout -ext subjectAltName                       # must cover portal. admin. www. auth.<DOMAIN> (or *.<DOMAIN>)
+openssl x509 -in ~/etisalat-tls/tls.crt -noout -ext subjectAltName                       # must cover portal. admin. www. auth. api.<DOMAIN> (or *.<DOMAIN>)
 [ "$(openssl x509 -in ~/etisalat-tls/tls.crt -noout -pubkey | openssl sha256)" = "$(openssl pkey -in ~/etisalat-tls/tls.key -pubout | openssl sha256)" ] && echo "cert and key match"
 ```
 ### B4b. Keycloak plugin jar — nothing to download, it is inside the bundle
@@ -139,13 +142,17 @@ Set exactly these lines (everything else already has the right default; the othe
 export KUBECONFIG_FILE="/home/<vm-user>/etisalat.kubeconfig"
 export NAMESPACE="tokenfactory"
 export SINGLE_NODE="no"
-export EXPOSE="clusterip"                      # Envoy + ingress are ClusterIP; the Cloudflare tunnel reaches them inside the cluster
-export BEHIND_CLOUDFLARE="yes"
+export EXPOSE="loadbalancer"                   # MetalLB direct
+export LB_INTERNAL="no"                        # (Azure-only flag)
+export ENVOY_LB_IP="172.22.100.242"            # api. LoadBalancer IP: any FREE IP of the pool 172.22.100.241-250 (.241 = ingress controller). Check: kubectl get svc -A | grep 172.22.100.24
+export BEHIND_CLOUDFLARE="no"                  # no Cloudflare: Envoy (api.) terminates TLS with TLS_CERT/TLS_KEY
 export INGRESS_TLS="yes"                       # must stay yes
 export INGRESS_TLS_SECRET="tf-etisalat-ingress-tls"
+export INGRESS_CONTROLLER="existing"            # the cluster already runs Ingress-NGINX on 172.22.100.241: this package installs no controller
+export INGRESS_CLASS="nginx"                    # kubectl get ingressclass  -> use the class name shown there
 export TLS_CERT="/home/<vm-user>/etisalat-tls/tls.crt"
 export TLS_KEY="/home/<vm-user>/etisalat-tls/tls.key"
-export DOMAIN="<the domain served through Cloudflare>"
+export DOMAIN="<the Etisalat domain, e.g. tokenfactory.etisalat.ae>"
 export STORAGE_CLASS="<storageclass from B2>"
 export NODE_LOAD_MODE="ssh"
 export NODES="<ssh-user>@172.22.100.24 <ssh-user>@172.22.100.25 <ssh-user>@172.22.100.26 <ssh-user>@172.22.100.27"
@@ -180,11 +187,24 @@ airgap/deploy-all.sh --from <phase>        # e.g. --from openmeter
 ```
 Never delete `~/.etisalat-service-keys.env` (created by the `secrets` phase; every upgrade needs the same values). Back it up now: `cp ~/.etisalat-service-keys.env <safe place>`.
 
-### B8. Cloudflare tunnel and DNS
-`verify` printed the in-cluster targets for the tunnel. Map the public hostnames as described in **Part M** (api. → Envoy Service :8080; portal./admin./www./auth. → `nginx-ingress-controller.nginx-ingress:80`). Admin login: user `admin@<DOMAIN>` (`PLATFORM_ADMIN_EMAIL`), password:
+### B8. DNS records and first login
+`verify` printed both addresses. Create these DNS records (internal DNS or `/etc/hosts` of the clients):
+| Name | IP |
+|---|---|
+| `portal.<DOMAIN>`, `admin.<DOMAIN>`, `www.<DOMAIN>`, `auth.<DOMAIN>` | `172.22.100.241` (existing Ingress-NGINX) |
+| `api.<DOMAIN>` | `172.22.100.242` (Envoy, `ENVOY_LB_IP`) |
+Check without DNS first (replace `<DOMAIN>`):
+```
+for h in www portal admin; do curl -sk -o /dev/null -w "$h %{http_code}\n" --resolve $h.<DOMAIN>:443:172.22.100.241 https://$h.<DOMAIN>/; done        # 200 200 200
+curl -sk --resolve auth.<DOMAIN>:443:172.22.100.241 https://auth.<DOMAIN>/auth/realms/master/.well-known/openid-configuration | grep -o '"issuer":"[^"]*"'
+curl -sk -o /dev/null -w "api %{http_code}\n" --resolve api.<DOMAIN>:443:172.22.100.242 https://api.<DOMAIN>/v1/models        # 401 without an API key = correct
+kubectl --kubeconfig ~/etisalat.kubeconfig -n tokenfactory get svc -l gateway.envoyproxy.io/owning-gateway-name=envoy         # EXTERNAL-IP 172.22.100.242
+```
+Admin login: user `admin@<DOMAIN>` (`PLATFORM_ADMIN_EMAIL`), password:
 ```
 kubectl --kubeconfig ~/etisalat.kubeconfig -n tokenfactory get secret tokenfactory-secrets -o jsonpath='{.data.platform-admin-password}' | base64 -d; echo
 ```
+
 ### B9. Check it is healthy
 ```
 export KUBECONFIG=~/etisalat.kubeconfig; export PATH=~/etisalat/bundle/tools:$PATH
@@ -257,7 +277,7 @@ Format of an `SVC_*` line: `"<replicas> <cpu-request> <mem-request> <cpu-limit> 
 | tf-shim | `3 25m 256Mi 1 1Gi` | |
 | tf-docs-web | `1 50m 96Mi 300m 256Mi` | only deployed when `DOCS_WEB="yes"` |
 | tf-site-web | `1 50m 64Mi 300m 256Mi` | |
-tf-ledger runs 3 pods with leader election (one pod runs the singleton loops, chosen by a Postgres advisory lock), a PDB (`minAvailable: 1`) and a RollingUpdate strategy, as on Xailon. Ingress: class `nginx` (F5), annotations `client-max-body-size 128m`, `proxy-buffer-size 16k`, `proxy-buffers 8 16k`, connect/read/send timeouts `75s/600s/600s`, `ssl-redirect "false"` (Cloudflare), TLS from your certificate: the same as Xailon.
+tf-ledger runs 3 pods with leader election (one pod runs the singleton loops, chosen by a Postgres advisory lock), a PDB (`minAvailable: 1`) and a RollingUpdate strategy, as on Xailon. Ingress: class `nginx` (F5), annotations `client-max-body-size 128m`, `proxy-buffer-size 16k`, `proxy-buffers 8 16k`, connect/read/send timeouts `75s/600s/600s`, `ssl-redirect "false"` only when `BEHIND_CLOUDFLARE="yes"`, TLS from your certificate: the same as Xailon.
 **How to change a value later:** edit the line in `config.env`, then `airgap/deploy-all.sh dry-run` and `airgap/deploy-all.sh render ns app` (Postgres lines: `airgap/deploy-all.sh pg`). Example, 4 relay pods with more memory: `export SVC_TF_RELAY="4 100m 512Mi 2 2Gi"`. Check what Helm will use: `grep -A6 '^tf-relay:' rendered/services.yaml`.
 
 ## PART E — If something goes wrong
@@ -376,7 +396,7 @@ The block has four parts: `className`, `annotations`, `tls`, `hosts`. Rules that
 | Add another host | add `- { host: "docs.${DOMAIN}", service: tf-site-web, port: 80 }` under `ingress.hosts` **and** the name under `ingress.tls[0].hosts` |
 | Bigger uploads / longer timeouts | `annotations`: `nginx.org/client-max-body-size: 256m`, `nginx.org/proxy-read-timeout: 900s` (units as shown) |
 | Send `auth.` straight to Keycloak | `ingress.hosts` line for `auth.`: `service: keycloak` instead of `keycloak-edge` (edge = nginx in the portal pods that turns a Keycloak 502/504 into the "sign-in unavailable" page) |
-| Different ingress controller | change `className`; the `nginx.org/*` annotations only work with the F5 controller — community ingress-nginx needs its own `nginx.ingress.kubernetes.io/*` equivalents (`proxy-body-size`, `proxy-buffer-size`, `proxy-read-timeout`) |
+| Different ingress controller | set `INGRESS_CLASS` in `config.env` (and `INGRESS_CONTROLLER`). The Ingress carries BOTH annotation sets (`nginx.org/*` for the F5 controller and `nginx.ingress.kubernetes.io/*` for the community Ingress-NGINX, each ignored by the other), so the body-size, buffer and timeout settings apply to either. Old note: community ingress-nginx needs its own `nginx.ingress.kubernetes.io/*` equivalents (`proxy-body-size`, `proxy-buffer-size`, `proxy-read-timeout`) |
 | Etisalat has its own ingress/LB | `ingress.enabled: false`, and route the 4 hosts yourself to Services `tf-portal-web:80`, `tf-admin-web:80`, `tf-site-web:80`, `keycloak-edge:80` (or `keycloak:80`) |
 | Replace the TLS certificate | `kubectl -n tokenfactory create secret tls tf-etisalat-tls --cert=new.crt --key=new.key --dry-run=client -o yaml \| kubectl apply -f -` (or set `TLS_CERT/TLS_KEY` and run `deploy-all.sh ns`); the controller and Envoy reload it by themselves, no pod restart |
 After any Ingress edit: `kubectl -n tokenfactory get ingress tokenfactory -o yaml` (hosts, tls, annotations), then `curl -sk --resolve portal.<domain>:443:<ingress-ip> https://portal.<domain>/ -o /dev/null -w '%{http_code}\n'`. If a host answers with nginx's own self-signed certificate, the TLS secret name or the host in `tls.hosts` does not match.
@@ -494,14 +514,15 @@ Afterwards every running image must come from the registry: `kubectl get pods -A
 | `02-push-registry.sh`: `INDEX has no path column` | the bundle was built by an older `01`; re-run `airgap/01-bundle-connected.sh` on the Mac (finished tars are skipped) and copy it again |
 | pod `ErrImagePull` on `@sha256` images only | they were pushed by something other than this script; re-run `airgap/deploy-all.sh images` |
 
-## PART M — Cloudflare tunnel (how traffic reaches TokenFactory, same as `tokenfactory-prod`)
+## PART M — OPTIONAL: Cloudflare tunnel instead of MetalLB (not used for Etisalat)
+> Etisalat uses **MetalLB direct** (B5/B8). Use this part only if you later put a Cloudflare tunnel in front: set `EXPOSE="clusterip"`, `BEHIND_CLOUDFLARE="yes"`, `ENVOY_LB_IP=""` and run `airgap/deploy-all.sh render ns app`.
 Cloudflare terminates TLS and forwards plain HTTP through a `cloudflared` tunnel. **`cloudflared` is not part of this package or of the chart** (in prod it is "an out-of-band in-cluster install"); Etisalat installs it the same way as prod, with the public hostnames mapped to in-cluster Services. The tunnel pods need outbound access to Cloudflare. After `deploy-all.sh all`, the `verify` phase prints the exact targets; typically:
 | Public hostname (Cloudflare) | Service URL for the tunnel | What answers |
 |---|---|---|
 | `api.<DOMAIN>` | `http://<envoy-service>.tokenfactory.svc.cluster.local:8080` | Envoy AI Gateway (inference API) |
-| `portal.<DOMAIN>`, `admin.<DOMAIN>`, `www.<DOMAIN>`, `auth.<DOMAIN>` | `http://nginx-ingress-controller.nginx-ingress.svc.cluster.local:80` | NGINX Ingress → `tf-portal-web`, `tf-admin-web`, `tf-site-web`, `keycloak-edge` (routes by host name; the tunnel must keep the original `Host`, which is cloudflared's default) |
+| `portal.<DOMAIN>`, `admin.<DOMAIN>`, `www.<DOMAIN>`, `auth.<DOMAIN>` | `http://172.22.100.241:80` (the existing Ingress-NGINX on MetalLB; or its in-cluster Service `<svc>.<ns>.svc.cluster.local:80` from `kubectl get svc -A \| grep -i ingress`; with `INGRESS_CONTROLLER="install"` it is `http://nginx-ingress-controller.nginx-ingress.svc.cluster.local:80`) | NGINX Ingress → `tf-portal-web`, `tf-admin-web`, `tf-site-web`, `keycloak-edge` (routes by host name; the tunnel must keep the original `Host`, which is cloudflared's default) |
 Find the Envoy Service name: `kubectl -n tokenfactory get svc -l gateway.envoyproxy.io/owning-gateway-name=envoy`. (tokenfactory-prod maps each hostname straight to its Service, e.g. `www` → `tf-site-web:80`; mapping the four web hostnames to the ingress instead is equivalent and keeps the host routing in the chart.)
-**With Ingress TLS** (default here) the portal/admin/www/auth targets can also be `https://nginx-ingress-controller.nginx-ingress.svc.cluster.local:443` (set the tunnel's `noTLSVerify` or `originServerName` because the in-cluster name is not in your certificate, and use Cloudflare SSL mode *Full*/*Full (strict)*); the plain `http://…:80` targets above keep working because the redirect is off.
+**With Ingress TLS** (default here) the portal/admin/www/auth targets can also be `https://172.22.100.241:443` (set the tunnel's `noTLSVerify` or `originServerName` because the in-cluster name is not in your certificate, and use Cloudflare SSL mode *Full*/*Full (strict)*); the plain `http://…:80` targets above keep working because the redirect is off.
 Checks after the tunnel is up: `curl -s -o /dev/null -w '%{http_code}\n' https://portal.<DOMAIN>/` → 200; `curl -s https://auth.<DOMAIN>/auth/realms/master/.well-known/openid-configuration | grep -o '"issuer":"[^"]*"'` → `https://auth.<DOMAIN>/auth/realms/master`; `curl -s -o /dev/null -w '%{http_code}\n' https://api.<DOMAIN>/v1/models` → 401 without a key.
 **`api.<DOMAIN>`** goes straight to Envoy over HTTP :8080 (like Xailon, where `api.` bypasses nginx).
 The real client IP comes from Cloudflare's `Cf-Connecting-Ip` header, which is only trustworthy while Cloudflare is the **only** way into Envoy — do not expose the Envoy or ingress Services any other way (no NodePort/LoadBalancer) while `BEHIND_CLOUDFLARE="yes"`.

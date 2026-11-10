@@ -7,7 +7,7 @@ controller:
   resources:
     requests: { cpu: 200m, memory: 256Mi }
     limits:   { cpu: "2",  memory: 1Gi }
-  ingressClass: { name: nginx, create: true }
+  ingressClass: { name: ${INGRESS_CLASS}, create: true }
   telemetryReporting: { enable: false }         # default true = the controller tries to phone home
   serviceAccount: { imagePullSecretName: registry-pull }
   service: { type: LoadBalancer }

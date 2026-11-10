@@ -17,7 +17,7 @@ need(){ command -v "$1" >/dev/null 2>&1 || die "missing tool: $1"; }
 wait_for(){ # desc timeout_s cmd...
   local d="$1" t="$2"; shift 2; local s=$SECONDS
   until "$@" >/dev/null 2>&1; do [ $((SECONDS-s)) -gt "$t" ] && die "timeout (${t}s) waiting for: $d"; sleep 5; done; echo "  ok: $d"; }
-VARS='REGISTRY TF_TAG BRAND_TAG DOMAIN SUPPORT_EMAIL STORAGE_CLASS PLATFORM_ADMIN_EMAIL SMTP_HOST SMTP_PORT SMTP_USER KEYCLOAK_JAR_URL DOCS_WEB_ENABLED ENVOY_REPLICAS ENVOY_PDB_MIN_AVAILABLE KEYCLOAK_REPLICAS KEYCLOAK_MEM_REQUEST KEYCLOAK_MEM_LIMIT KEYCLOAK_HEAP INGRESS_ENABLED SMTP_SSL SMTP_STARTTLS INGRESS_TLS_SECRET TF_LEDGER_REPLICAS'
+VARS='REGISTRY TF_TAG BRAND_TAG DOMAIN SUPPORT_EMAIL STORAGE_CLASS PLATFORM_ADMIN_EMAIL SMTP_HOST SMTP_PORT SMTP_USER KEYCLOAK_JAR_URL DOCS_WEB_ENABLED ENVOY_REPLICAS ENVOY_PDB_MIN_AVAILABLE KEYCLOAK_REPLICAS KEYCLOAK_MEM_REQUEST KEYCLOAK_MEM_LIMIT KEYCLOAK_HEAP INGRESS_ENABLED SMTP_SSL SMTP_STARTTLS INGRESS_TLS_SECRET TF_LEDGER_REPLICAS INGRESS_CLASS'
 # Keycloak SPI jar: empty KEYCLOAK_JAR_URL = host the bundled jar inside the cluster (phase `jar`)
 JAR_FILE="$(ls "$BUNDLE_DIR"/jars/*.jar 2>/dev/null | sort -V | tail -1 || true)"   # newest version if several jars are present; JAR_INCLUSTER=0
 if [ -z "${KEYCLOAK_JAR_URL:-}" ]; then JAR_INCLUSTER=1; KEYCLOAK_JAR_URL="http://keycloak-spi.${NAMESPACE}.svc.cluster.local:8080/$(basename "${JAR_FILE:-keycloak-2fa-email-authenticator.jar}")"; fi
@@ -26,8 +26,8 @@ export KEYCLOAK_JAR_URL
 : "${ENVOY_REPLICAS:=6}" "${ENVOY_PDB_MIN_AVAILABLE:=1}" "${KEYCLOAK_REPLICAS:=3}" "${KEYCLOAK_MEM_REQUEST:=1Gi}" "${KEYCLOAK_MEM_LIMIT:=2Gi}"
 : "${KEYCLOAK_HEAP:=-Xms512m -Xmx2g -XX:+UseContainerSupport}" "${INGRESS_ENABLED:=true}"
 : "${SMTP_SSL:=true}" "${SMTP_STARTTLS:=false}" "${EXPOSE:=loadbalancer}" "${BEHIND_CLOUDFLARE:=no}" "${INGRESS_TLS:=yes}" "${INGRESS_TLS_SECRET:=tf-etisalat-tls}"   # older config.env keeps the old behaviour
-: "${PG_VERSION:=16}" "${KEYCLOAK_ANTIAFFINITY:=required}" "${PG_INSTANCES:=3}" "${PG_VOLUME_SIZE:=20Gi}" "${PG_CPU_REQUEST:=1}" "${PG_MEM_REQUEST:=2Gi}" "${PG_CPU_LIMIT:=4}" "${PG_MEM_LIMIT:=8Gi}" "${PG_MAX_CONNECTIONS:=300}"
-export ENVOY_REPLICAS ENVOY_PDB_MIN_AVAILABLE KEYCLOAK_REPLICAS KEYCLOAK_MEM_REQUEST KEYCLOAK_MEM_LIMIT KEYCLOAK_HEAP INGRESS_ENABLED SMTP_SSL SMTP_STARTTLS INGRESS_TLS_SECRET
+: "${INGRESS_CONTROLLER:=install}" "${INGRESS_CLASS:=nginx}" "${ENVOY_LB_IP:=}" "${PG_VERSION:=16}" "${KEYCLOAK_ANTIAFFINITY:=required}" "${PG_INSTANCES:=3}" "${PG_VOLUME_SIZE:=20Gi}" "${PG_CPU_REQUEST:=1}" "${PG_MEM_REQUEST:=2Gi}" "${PG_CPU_LIMIT:=4}" "${PG_MEM_LIMIT:=8Gi}" "${PG_MAX_CONNECTIONS:=300}"
+export INGRESS_CLASS ENVOY_REPLICAS ENVOY_PDB_MIN_AVAILABLE KEYCLOAK_REPLICAS KEYCLOAK_MEM_REQUEST KEYCLOAK_MEM_LIMIT KEYCLOAK_HEAP INGRESS_ENABLED SMTP_SSL SMTP_STARTTLS INGRESS_TLS_SECRET
 # per-service replicas + CPU/RAM (defaults = live xailon-tf-prod values; an older config.env without these lines still works)
 : "${SVC_TF_ACCOUNTS:=3 50m 64Mi 200m 256Mi}" "${SVC_TF_ADMIN_WEB:=3 none}" "${SVC_TF_AUTH:=3 none}" "${SVC_TF_BABEL:=3 25m 32Mi 300m 256Mi}" "${SVC_TF_CONTROL:=3 none}"
 : "${SVC_TF_DOCS_WEB:=1 50m 96Mi 300m 256Mi}" "${SVC_TF_LEDGER:=3 none}" "${SVC_TF_OPS:=3 20m 48Mi 250m 128Mi}" "${SVC_TF_PORTAL_WEB:=3 50m 32Mi 200m 1Gi}" "${SVC_TF_RELAY:=3 none}"
@@ -68,6 +68,8 @@ phase_check(){
     if [ "$PG_OPERATOR_MODE" = existing ]; then kubectl get crd postgresqls.acid.zalan.do >/dev/null 2>&1 || die "PG_OPERATOR_MODE=existing but no postgresqls.acid.zalan.do CRD"; fi
     [ -s "$BUNDLE_DIR/tars/INDEX" ] || die "image tars missing: $BUNDLE_DIR/tars (copy the bundle)"
   fi
+  case "$INGRESS_CONTROLLER" in install|existing) ;; *) die "INGRESS_CONTROLLER must be install or existing";; esac
+  if [ $DRY = 0 ] && [ "$INGRESS_CONTROLLER" = existing ]; then kubectl get ingressclass "$INGRESS_CLASS" >/dev/null 2>&1 || die "INGRESS_CONTROLLER=existing but no IngressClass '$INGRESS_CLASS' (kubectl get ingressclass): set INGRESS_CLASS to the class of the cluster's ingress controller, or INGRESS_CONTROLLER=install"; fi
   if [ $JAR_INCLUSTER = 1 ]; then [ -s "$JAR_FILE" ] || die "no Keycloak jar in $BUNDLE_DIR/jars (rebuild the bundle) and KEYCLOAK_JAR_URL is empty"; fi
   if [ "${SMTP_USER:-}" = resend ] && [ -z "${SMTP_PASSWORD:-}" ]; then echo "  WARNING: SMTP_USER=resend but SMTP_PASSWORD (the Resend API key) is empty - no mails will be sent (sign-up/OTP/reset)"; fi
   echo "  check passed"
@@ -135,6 +137,11 @@ phase_render(){
   if [ "$EXPOSE" = clusterip ]; then cp "$ROOT/values/expose-clusterip.umbrella.yaml" "$OUT/lb-umbrella.yaml"; cp "$ROOT/values/expose-clusterip.nginx.yaml" "$OUT/lb-nginx.yaml"
   elif [ "${LB_INTERNAL:-no}" = yes ]; then cp "$ROOT/values/lb-internal.umbrella.yaml" "$OUT/lb-umbrella.yaml"; cp "$ROOT/values/lb-internal.nginx.yaml" "$OUT/lb-nginx.yaml"
   else cp "$ROOT/values/lb-none.yaml" "$OUT/lb-umbrella.yaml"; cp "$ROOT/values/lb-none.yaml" "$OUT/lb-nginx.yaml"; fi
+  echo '{}' > "$OUT/lb-envoyip.yaml"
+  if [ "$EXPOSE" = loadbalancer ] && [ -n "${ENVOY_LB_IP:-}" ]; then   # MetalLB (or any LB): fixed IP for api.
+    { echo "tf-gateway-resources:"; echo "  envoyProxy:"; echo "    spec:"; echo "      provider:"; echo "        kubernetes:"; echo "          envoyService:"; echo "            loadBalancerIP: $ENVOY_LB_IP"; } > "$OUT/lb-envoyip.yaml"
+    echo "  Envoy (api.) Service LoadBalancer IP: $ENVOY_LB_IP"
+  fi
   if [ "$BEHIND_CLOUDFLARE" = yes ]; then cp "$ROOT/values/edge-cloudflare.yaml" "$OUT/edge.yaml"; else echo '{}' > "$OUT/edge.yaml"; fi
   echo '{}' > "$OUT/tlsmode.yaml"   # Ingress is always TLS (INGRESS_TLS=yes is enforced in `check`)
   echo "  rendered values (no secrets inside); LB_INTERNAL=${LB_INTERNAL:-no}"
@@ -244,6 +251,11 @@ phase_controllers(){
 }
 
 phase_ingress(){
+  if [ "$INGRESS_CONTROLLER" = existing ]; then
+    log "Ingress controller: using the cluster's existing one (class $INGRESS_CLASS) - nothing installed"
+    if [ $DRY = 0 ]; then kubectl get ingressclass "$INGRESS_CLASS"; echo "  controller Services:"; kubectl get svc -A 2>/dev/null | grep -i ingress | grep -v admission | sed 's/^/    /' || true; fi
+    return 0
+  fi
   log "F5 NGINX Ingress Controller 3.6.2"
   helm upgrade --install nginx-ingress "$C/nginx-ingress-1.3.2.tgz" -n nginx-ingress -f "$OUT/nginx-ingress.yaml" -f "$OUT/lb-nginx.yaml" --wait --timeout 10m
   [ $DRY = 1 ] || kubectl get ingressclass nginx
@@ -291,7 +303,7 @@ phase_app(){
   kubectl -n "$NAMESPACE" get secret tokenfactory-secrets tf-etisalat-tls >/dev/null || die "tokenfactory-secrets / tf-etisalat-tls missing in $NAMESPACE"
   echo "  pre-install checks ok (CRDs, OpenMeter API, secrets)"
   SKIP_PREFLIGHT=1 CHART_DIR="$REPO/helm/tokenfactory" RELEASE=tokenfactory NAMESPACE="$NAMESPACE" VALUES="$REPO/helm/tokenfactory/values-tf-etisalat.yaml" \
-    HELM_ARGS="-f $OUT/umbrella.yaml -f $OUT/services.yaml -f $OUT/lb-umbrella.yaml -f $OUT/edge.yaml -f $OUT/tlsmode.yaml -f $OUT/custom.yaml -f $OUT/service-keys.yaml --timeout 30m" \
+    HELM_ARGS="-f $OUT/umbrella.yaml -f $OUT/services.yaml -f $OUT/lb-umbrella.yaml -f $OUT/lb-envoyip.yaml -f $OUT/edge.yaml -f $OUT/tlsmode.yaml -f $OUT/custom.yaml -f $OUT/service-keys.yaml --timeout 30m" \
     "$REPO/helm/setup/scripts/install.sh"
 }
 
@@ -304,14 +316,22 @@ phase_verify(){
   kubectl get pods -A -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.image}{"\n"}{end}{range .spec.initContainers[*]}{.image}{"\n"}{end}{end}' | sort -u | grep -vE "^$REGISTRY/|^registry.k8s.io/pause|^$" | grep -vE "kube-|calico|flannel|cilium|coredns|etcd|csi|metrics-server" || echo "  none"
   echo "-- keycloak HA:"; kubectl -n "$NAMESPACE" get sts keycloak; kubectl -n "$NAMESPACE" get pdb | grep -i keycloak || true
   echo "-- ingress:"; kubectl -n "$NAMESPACE" get ingress tokenfactory
+  local ING_SVC ING_IP
+  if [ "$INGRESS_CONTROLLER" = existing ]; then
+    ING_SVC=$(kubectl get svc -A -l app.kubernetes.io/name=ingress-nginx -o jsonpath='{.items[0].metadata.name}.{.items[0].metadata.namespace}.svc.cluster.local' 2>/dev/null || true)
+    ING_IP=$(kubectl get svc -A -l app.kubernetes.io/name=ingress-nginx -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+    [ -n "$ING_SVC" ] || ING_SVC="<the ingress controller Service: kubectl get svc -A | grep -i ingress>"
+  else
+    ING_SVC="nginx-ingress-controller.nginx-ingress.svc.cluster.local"; ING_IP=$(kubectl -n nginx-ingress get svc nginx-ingress-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+  fi
   if [ "$EXPOSE" = clusterip ]; then
     echo "-- Cloudflare tunnel targets (ClusterIP Services; map the public hostnames to these):"
-    echo "   portal./admin./www./auth.${DOMAIN}  ->  http://nginx-ingress-controller.nginx-ingress.svc.cluster.local:80   (the Ingress routes by host name)"
+    echo "   portal./admin./www./auth.${DOMAIN}  ->  http://${ING_SVC}:80   (the Ingress routes by host name${ING_IP:+; same controller is on $ING_IP})"
     echo "   api.${DOMAIN}                        ->  http://$(kubectl -n "$NAMESPACE" get svc -l gateway.envoyproxy.io/owning-gateway-name=envoy -o jsonpath='{.items[0].metadata.name}' 2>/dev/null).${NAMESPACE}.svc.cluster.local:8080"
   else
     echo "-- LB addresses (create DNS):"
     echo "   api.${DOMAIN}                      -> $(kubectl -n "$NAMESPACE" get svc -l gateway.envoyproxy.io/owning-gateway-name=envoy -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}' 2>/dev/null)"
-    echo "   portal./admin./www./auth.${DOMAIN} -> $(kubectl -n nginx-ingress get svc nginx-ingress-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)"
+    echo "   portal./admin./www./auth.${DOMAIN} -> ${ING_IP}"
   fi
   echo "-- admin login: kubectl -n $NAMESPACE get secret tokenfactory-secrets -o jsonpath='{.data.platform-admin-password}' | base64 -d"
 }
@@ -328,7 +348,7 @@ phase_dryrun(){
   T nginx-ingress "$C/nginx-ingress-1.3.2.tgz" -n nginx-ingress -f "$OUT/nginx-ingress.yaml" -f "$OUT/lb-nginx.yaml"
   T openmeter "$REPO/helm/infrastructure/openmeter" -n openmeter -f "$OUT/openmeter.yaml" --set openmeter.clickhouseCredentials.existingSecretName=om-clickhouse-pw --set openmeter.config.postgres.url=x --set openmeter.svix.database.dsn=x
   write_service_keys dryrun dryrun dryrun dryrun dryrun
-  T tokenfactory "$REPO/helm/tokenfactory" -n "$NAMESPACE" -f "$REPO/helm/tokenfactory/values-tf-etisalat.yaml" -f "$OUT/umbrella.yaml" -f "$OUT/services.yaml" -f "$OUT/lb-umbrella.yaml" -f "$OUT/edge.yaml" -f "$OUT/tlsmode.yaml" -f "$OUT/custom.yaml" -f "$OUT/service-keys.yaml" \
+  T tokenfactory "$REPO/helm/tokenfactory" -n "$NAMESPACE" -f "$REPO/helm/tokenfactory/values-tf-etisalat.yaml" -f "$OUT/umbrella.yaml" -f "$OUT/services.yaml" -f "$OUT/lb-umbrella.yaml" -f "$OUT/lb-envoyip.yaml" -f "$OUT/edge.yaml" -f "$OUT/tlsmode.yaml" -f "$OUT/custom.yaml" -f "$OUT/service-keys.yaml" \
     --set-file keycloak.theme.archive="$REPO/brands/etisalat/keycloak/theme.tar.gz.b64"
   log "dry-run PASSED - safe to run: ./deploy-all.sh all"
 }
