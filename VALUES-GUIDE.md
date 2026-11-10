@@ -24,7 +24,8 @@ Location: Mac `~/Downloads/ethisalat/config.env`; install VM `~/etisalat/config.
 ## 2. `config.env` — every variable
 | Variable | Default | Sets | Developer-overlay key |
 |---|---|---|---|
-| `TF_TAG` | `0.17.2-356be61` | tf-* image tag | `global.image.tag` |
+| `TF_TAG` | `0.17.7-160792b` | tf-* image tag (`<chart version>-<sha>`) | `global.image.tag` |
+| `CHART_REPO`, `CHART_REF` | `Infinia-Technology/ai-gateway-platform`, commit `644da68…` (branch `stage`, chart 0.17.7) | which chart checkout `airgap/00-fetch-chart.sh` fetches; bump together with `TF_TAG` | – |
 | `BRAND_TAG` | `0.17.0-etisalat-6b27a33` | Etisalat web images | `global.brandImages.*.tag` |
 | `IMAGE_MODE`, `REGISTRY`, `REGISTRY_USER/PASS` | `tar`, `registry.etisalat.local` | how images reach nodes / registry prefix | `global.image.registry` |
 | `NODE_LOAD_MODE`, `NODES` | `pod` (lab) / `ssh` (real) | tar loading | – |
@@ -33,9 +34,9 @@ Location: Mac `~/Downloads/ethisalat/config.env`; install VM `~/etisalat/config.
 | `STORAGE_CLASS` | – | PVC class | `global.storageClass` |
 | `DOMAIN` | – | creates `api. auth. portal. admin. www.<DOMAIN>` | `global.urls.*` |
 | `SUPPORT_EMAIL`, `PLATFORM_ADMIN_EMAIL` | `support@iamsaif.ai` (Resend-verified, as prod) / `admin@<DOMAIN>` | sender, super-admin login | `global.supportEmail`, `tf-auth…smtp.from`, `…platformAdminEmail` |
-| **`BEHIND_CLOUDFLARE`** | `yes` | `yes` = like prod: Cloudflare terminates TLS, **no certificate**, plain HTTP inside, `Cf-Connecting-Ip` trusted (Envoy + warden), Ingress without TLS; `no` = you terminate TLS | `tf-gateway-resources.tls.enabled`, `clientIPHeader`, `tf-warden.trustedClientIPHeader`, `ingress.tls` |
+| **`BEHIND_CLOUDFLARE`** | `yes` | `yes` = like prod: Cloudflare terminates TLS, **no certificate**, plain HTTP inside, `Cf-Connecting-Ip` trusted (Envoy + warden); `no` = Envoy (api.) terminates TLS itself | `tf-gateway-resources.tls.enabled`, `clientIPHeader`, `tf-warden.trustedClientIPHeader`, `ingress.tls` |
 | **`EXPOSE`** | `clusterip` | `clusterip` = Envoy and ingress Services are ClusterIP (the Cloudflare tunnel reaches them); `loadbalancer` = LoadBalancer Services | `…envoyService.type`, `controller.service.type` |
-| **`INGRESS_TLS`**, `INGRESS_TLS_SECRET` | `yes`, `tf-etisalat-ingress-tls` | `yes` = Ingress `tls:` block from your cert (Xailon style); `no` = plain HTTP Ingress (prod's live one) | `ingress.tls` |
+| **`INGRESS_TLS`**, `INGRESS_TLS_SECRET` | `yes`, `tf-etisalat-ingress-tls` | **must be `yes`**: the Ingress always gets a `tls:` block from your cert (Xailon style); chart >= 0.17 refuses a plain-HTTP Ingress, and `deploy-all.sh check` stops on `no` | `ingress.tls` |
 | `TLS_CERT`, `TLS_KEY` | – | your PEM certificate + key → TLS Secret for the Ingress (and for Envoy when `BEHIND_CLOUDFLARE=no`) | `ingress.tls[].secretName`, `tf-gateway-resources.tls.certSecretName` |
 | `SMTP_HOST/PORT/USER/SSL/STARTTLS/PASSWORD` | Resend as prod: `smtp.resend.com`/`465`/`resend`/`true`/`false` + the Resend API key | mail relay (needs outbound 465 to Resend) | `tf-auth.config.keycloak.smtp.*` |
 | `KEYCLOAK_JAR_URL` | empty | empty = the installer hosts the bundled jar inside the cluster (recommended); or your own internal URL | `keycloak.providers.plugins[0].url` |
@@ -45,15 +46,15 @@ Location: Mac `~/Downloads/ethisalat/config.env`; install VM `~/etisalat/config.
 | **`ENVOY_REPLICAS`** | **`6`** | Envoy data-plane pods (**minimum 6**; prod runs 10). Envoy has **no CPU/RAM requests or limits** (same as prod — it takes all the inference load) | `tf-gateway-resources.envoyProxy…replicas` |
 | `ENVOY_PDB_MIN_AVAILABLE` | `1` | Envoy PodDisruptionBudget | `…envoyPDB.minAvailable` |
 | **`KEYCLOAK_REPLICAS`** | **`3`** | Keycloak HA pods (Infinispan cluster) | `keycloak.replicaCount` |
-| `KEYCLOAK_MEM_REQUEST/LIMIT`, `KEYCLOAK_HEAP` | `1Gi`/`8Gi`, `-Xms512m -Xmx2g …` | as tokenfactory-prod (memory only) | `keycloak.resources`, `jvmHeapOpts` |
-| **`PG_INSTANCES`** | **`3`** | Postgres HA instances (forced to 1 by `SINGLE_NODE=yes`) | – (pgdb chart) |
-| `PG_VOLUME_SIZE`, `PG_CPU_REQUEST/LIMIT`, `PG_MEM_REQUEST/LIMIT`, `PG_MAX_CONNECTIONS` | `20Gi`, `1`/`4`, `2Gi`/`8Gi`, `300` | as tokenfactory-prod | – (pgdb chart) |
-| `TF_REPLICAS` | `3` | replicas of accounts, auth, relay, babel, shim, control, ops, warden, portal-web, admin-web (`tf-ledger` is always 1) | `tf-*.replicas` |
-| `SITE_DOCS_REPLICAS` | `1` | `tf-site-web`, `tf-docs-web` (1 in prod) | `tf-site-web.replicas` … |
-| `INGRESS_ENABLED` | `true` | create the Ingress for portal/admin/www/auth | (Xailon PR #678 `ingress.enabled`) |
+| `KEYCLOAK_MEM_REQUEST/LIMIT`, `KEYCLOAK_HEAP`, `KEYCLOAK_ANTIAFFINITY` | `1Gi`/`2Gi`, `-Xms512m -Xmx2g …`, `required` | as xailon-tf-prod (memory only; one pod per node) | `keycloak.resources`, `jvmHeapOpts`, `affinity` |
+| `PG_VERSION`, **`PG_INSTANCES`** | `16`, **`3`** | Postgres major version (same as Xailon's Azure Postgres 16) and HA instances (forced to 1 by `SINGLE_NODE=yes`) | – (pgdb chart) |
+| `PG_VOLUME_SIZE`, `PG_CPU_REQUEST/LIMIT`, `PG_MEM_REQUEST/LIMIT`, `PG_MAX_CONNECTIONS` | `20Gi`, `1`/`4`, `2Gi`/`8Gi`, `300` | Zalando pgdb sizing | – (pgdb chart) |
+| **`SVC_TF_*`** (13 lines: `SVC_TF_ACCOUNTS`, `SVC_TF_ADMIN_WEB`, `SVC_TF_AUTH`, `SVC_TF_BABEL`, `SVC_TF_CONTROL`, `SVC_TF_DOCS_WEB`, `SVC_TF_LEDGER`, `SVC_TF_OPS`, `SVC_TF_PORTAL_WEB`, `SVC_TF_RELAY`, `SVC_TF_SHIM`, `SVC_TF_SITE_WEB`, `SVC_TF_WARDEN`) | the live `xailon-tf-prod` values, e.g. `"3 50m 64Mi 200m 256Mi"` or `"3 none"` | replicas + CPU/RAM of each service: `"<replicas> <cpu-req> <mem-req> <cpu-lim> <mem-lim>"`, `-` leaves one out, `none` = no requests/limits (tf-ledger = 3 with leader election) | `tf-*.replicas`, `tf-*.resources` |
+| `RES_OPENFGA`, `RES_MINIO`, `RES_REDIS` | `- 64Mi - 256Mi`, `50m 128Mi 300m 512Mi`, `100m 1Gi 1 4Gi` | CPU/RAM of the single-instance infra (`<cpu-req> <mem-req> <cpu-lim> <mem-lim>`) | `openfga.resources`, `minio.resources`, `redis.resources` |
+| `INGRESS_ENABLED` | `true` | create the Ingress for portal/admin/www/auth | (chart `ingress.enabled`) |
 | **`CUSTOM_VALUES_YAML`** | empty | **any other value** (see §3) | any |
 
-Per-service CPU/RAM of the tf-* pods are the **tokenfactory-prod live values** (accounts 50m/64Mi–200m/256Mi, relay/warden/shim up to 1 CPU/1Gi, …). They live in `values/umbrella.values.yaml.tmpl` (the `tf-*:` one-liners at the end); change one through `CUSTOM_VALUES_YAML`, not by editing the template.
+Per-service replicas and CPU/RAM are the `SVC_*` / `RES_*` lines above (defaults = live `xailon-tf-prod`); `airgap/deploy-all.sh render` turns them into `rendered/services.yaml`. Use `CUSTOM_VALUES_YAML` only for values that have no variable.
 
 ## 3. `CUSTOM_VALUES_YAML` — changing anything else from `config.env`
 Raw YAML in a single-quoted shell string, two-space indentation, only the keys you change:
@@ -90,7 +91,7 @@ Rules: keys are exactly those of the chart (`ai-gateway-platform/helm/tokenfacto
 | datastores (Postgres external, Redis/S3 bundled) | already set (Zalando `pgdb`); Postgres size/instances → `PG_*` |
 | `redis` persistence / `maxmemory` | developer's file (10Gi / 3gb) |
 | Persona CDD | not in the chart on `develop` yet |
-| **Ingress** (Xailon PR #678, not in the developer's file) | `INGRESS_ENABLED`; hosts/annotations/class → `CUSTOM_VALUES_YAML` or `DEPLOY.md` J1 |
+| **Ingress** (chart `ingress:` block, not in the developer's file) | `INGRESS_ENABLED`; hosts/annotations/class → `CUSTOM_VALUES_YAML` or `DEPLOY.md` J1 |
 
 ## 5. After editing `config.env` — apply
 ```

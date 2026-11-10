@@ -82,11 +82,7 @@ tf-gateway-resources:
             minAvailable: ${ENVOY_PDB_MIN_AVAILABLE}                                               # config.env ENVOY_PDB_MIN_AVAILABLE (prod: 1)
 
 # ── Identity ──
-tf-auth:
-  replicas: ${TF_REPLICAS}                                  # S2
-  resources:
-    requests: { cpu: 50m, memory: 64Mi }
-    limits:   { cpu: 200m, memory: 256Mi }
+tf-auth:                                        # replicas + resources: generated from SVC_TF_AUTH (config.env) into rendered/services.yaml
   config:
     keycloak:
       platformAdminEmail: "${PLATFORM_ADMIN_EMAIL}"
@@ -99,12 +95,12 @@ tf-auth:
         ssl: ${SMTP_SSL}
         starttls: ${SMTP_STARTTLS}
 
-keycloak:                                       # Keycloak HA
-  replicaCount: ${KEYCLOAK_REPLICAS}                               # S3  (config.env KEYCLOAK_REPLICAS)
-  resources:                                    # same as tokenfactory-prod (live): memory only, no CPU request/limit
+keycloak:                                       # Keycloak HA (pod anti-affinity: generated into rendered/services.yaml from KEYCLOAK_ANTIAFFINITY)
+  replicaCount: ${KEYCLOAK_REPLICAS}                               # config.env KEYCLOAK_REPLICAS
+  resources:                                    # same as xailon-tf-prod (live): memory only, no CPU request/limit
     requests: { memory: ${KEYCLOAK_MEM_REQUEST} }
     limits:   { memory: ${KEYCLOAK_MEM_LIMIT} }
-  jvmHeapOpts: "${KEYCLOAK_HEAP}"      # same as prod; keep Xmx well below limits.memory
+  jvmHeapOpts: "${KEYCLOAK_HEAP}"      # same as Xailon; keep Xmx at or below limits.memory
   image:
     repository: keycloak/keycloak               # chart default is quay.io/keycloak/keycloak; mirror layout drops the host. Digest pin is kept.
   config:
@@ -113,14 +109,6 @@ keycloak:                                       # Keycloak HA
     cacheOwnersCount: 2
     discovery: dns-ping                         # JGroups DNS_PING over the headless Service
     pdb: { enabled: true, maxUnavailable: 1 }
-  affinity:                                     # spread over nodes. Change `preferred...` to `required...` once you have >=3 nodes
-    podAntiAffinity:
-      preferredDuringSchedulingIgnoredDuringExecution:
-        - weight: 100
-          podAffinityTerm:
-            topologyKey: kubernetes.io/hostname
-            labelSelector:
-              matchLabels: { app.kubernetes.io/name: keycloak }
   postgres:
     database: keycloak
     user: keycloak
@@ -148,39 +136,22 @@ openfga:
       sslMode: require
       existingSecret: "openfga.pgdb.credentials.postgresql.acid.zalan.do"
       passwordKey: password
-  resources:                                    # S4
-    requests: { memory: 64Mi }
-    limits:   { memory: 256Mi }
 
 minio:                                          # single instance by design (standalone mode)
   initContainers:
     chownImage: { repository: "${REGISTRY}/busybox" }
-  resources:                                    # S4
-    requests: { cpu: 50m, memory: 128Mi }
-    limits:   { cpu: 300m, memory: 512Mi }
 
-redis:                                          # single instance (chart supports standalone HA only against a managed endpoint)
-  resources:                                    # S4
-    requests: { cpu: 100m, memory: 1Gi }
-    limits:   { cpu: "1", memory: 4Gi }
+# redis: single instance (the chart supports standalone HA only against a managed endpoint). openfga / minio / redis resources: RES_* in config.env
 
 tf-ledger:
-  replicas: 1                                   # MUST stay 1 (no leader election in tf-ledger)
-  resources:                                    # S2
-    requests: { cpu: 50m, memory: 64Mi }
-    limits:   { cpu: 300m, memory: 256Mi }
+  # replicas + resources: SVC_TF_LEDGER (config.env). HA: since chart 0.17.4 tf-ledger elects ONE leader (Postgres advisory lock) for its singleton loops; safe on a FRESH install
+  leaderElection:
+    enabled: true
+  pdb: { enabled: true, minAvailable: 1 }
+  deploymentStrategy:                                       # the chart default is Recreate; a rolling update keeps a leader/consumer alive (same as tf-stage / Xailon)
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
   geoip:
     enabled: false                              # downloads from GitHub at runtime -> off in an air-gap
 
-# ── S2. TokenFactory services: replicas + resources (defaults = chart defaults; raise for production load) ──
-tf-accounts:   { replicas: ${TF_REPLICAS}, resources: { requests: { cpu: 50m,  memory: 64Mi  }, limits: { cpu: 200m,  memory: 256Mi } } }
-tf-relay:      { replicas: ${TF_REPLICAS}, resources: { requests: { cpu: 50m,  memory: 256Mi }, limits: { cpu: 1000m, memory: 1Gi   } } }
-tf-babel:      { replicas: ${TF_REPLICAS}, resources: { requests: { cpu: 25m,  memory: 32Mi  }, limits: { cpu: 300m,  memory: 256Mi } } }
-tf-shim:       { replicas: ${TF_REPLICAS}, resources: { requests: { cpu: 25m,  memory: 256Mi }, limits: { cpu: 1000m, memory: 1Gi   } } }
-tf-control:    { replicas: ${TF_REPLICAS}, resources: { requests: { cpu: 25m,  memory: 64Mi  }, limits: { cpu: 500m,  memory: 256Mi } } }
-tf-ops:        { replicas: ${TF_REPLICAS}, resources: { requests: { cpu: 20m,  memory: 48Mi  }, limits: { cpu: 250m,  memory: 128Mi } } }
-tf-warden:     { replicas: ${TF_REPLICAS}, resources: { requests: { cpu: 25m,  memory: 256Mi }, limits: { cpu: 1000m, memory: 1Gi   } } }
-tf-portal-web: { replicas: ${TF_REPLICAS}, resources: { requests: { cpu: 50m,  memory: 32Mi  }, limits: { cpu: 200m,  memory: 1Gi   } } }
-tf-admin-web:  { replicas: ${TF_REPLICAS}, resources: { requests: { cpu: 50m,  memory: 32Mi  }, limits: { cpu: 200m,  memory: 1Gi   } } }
-tf-docs-web:   { enabled: ${DOCS_WEB_ENABLED}, replicas: ${SITE_DOCS_REPLICAS}, resources: { requests: { cpu: 50m,  memory: 96Mi  }, limits: { cpu: 300m,  memory: 256Mi } } }
-tf-site-web:   { replicas: ${SITE_DOCS_REPLICAS}, resources: { requests: { cpu: 50m,  memory: 64Mi  }, limits: { cpu: 300m,  memory: 256Mi } } }
+# ── TokenFactory services (replicas + CPU/RAM): generated from the SVC_* lines of config.env into rendered/services.yaml ──

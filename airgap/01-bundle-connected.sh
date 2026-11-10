@@ -1,12 +1,30 @@
 #!/usr/bin/env bash
 # RUN ON THE INTERNET-CONNECTED MAC/LAPTOP, from the package root. Builds ./bundle/ : image TAR files + charts + CRDs + jar + helm.
-# Needs: skopeo, helm, curl, tar, perl.  Logins first:  skopeo login docker.io   skopeo login ghcr.io  (ghcr needs a READ token for infinia-technology)
+# Needs: skopeo, crane (only for docker manifest lists), helm, curl, tar, perl, python3.  Logins first:  skopeo login docker.io   skopeo login ghcr.io  (ghcr needs a READ token for infinia-technology)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . airgap/env.sh
 mkdir -p "$BUNDLE_DIR"/{tars,charts,crds,jars,repo,tools}
 case "$TF_TAG$BRAND_TAG" in *REPLACE*) echo "set TF_TAG and BRAND_TAG in config.env first"; exit 1;; esac
 command -v skopeo >/dev/null || { echo "skopeo missing (brew install skopeo)"; exit 1; }
+
+# Some Docker Hub images (openfga, curl) are DOCKER manifest lists: skopeo cannot write those to an OCI archive without changing the digest
+# ("Manifest list must be converted ... Instructed to preserve digests"). crane keeps the original manifest bytes, so the @sha256 reference
+# the chart uses still resolves. Anonymous pull (public images only); needs `brew install crane`.
+pull_with_crane(){ # SRC REF OUTTAR
+  command -v crane >/dev/null || return 1
+  local src="$1" ref="$2" out="$3" d; d=$(mktemp -d); mkdir -p "$d/dc"
+  DOCKER_CONFIG="$d/dc" crane pull --format oci "$src" "$d/layout" >/dev/null 2>&1 || { rm -rf "$d"; return 1; }
+  REF="$ref" LAYOUT="$d/layout" python3 - <<'PY'
+import json, os
+p = os.path.join(os.environ["LAYOUT"], "index.json"); ref = os.environ["REF"]
+i = json.load(open(p))
+for m in i["manifests"]:
+    m["annotations"] = {"io.containerd.image.name": ref, "org.opencontainers.image.ref.name": ref.rsplit(":", 1)[-1]}
+json.dump(i, open(p, "w"))
+PY
+  COPYFILE_DISABLE=1 tar -C "$d/layout" -cf "$out" oci-layout index.json blobs && rm -rf "$d"   # no ./ prefix: what ctr/containerd expects
+}
 
 echo "== images -> tar files (one per image, named $REGISTRY/<path>) =="
 : > "$BUNDLE_DIR/tars/INDEX"; FAILED=""
@@ -19,7 +37,9 @@ while IFS='|' read -r src dst mode; do
   from="$src"; case "$src" in *@sha256:*) r="${src%@*}"; r="${r%:*}"; from="$r@${src##*@}";; esac   # skopeo rejects tag+digest: use repo@digest
   flags="--override-os linux --override-arch ${PLATFORM#linux/}"; [ "$mode" = all ] && flags="--all --preserve-digests"
   echo "pull  $from"; rm -f "$tar.part"
-  if skopeo copy $flags "docker://$from" "oci-archive:$tar.part:$ref"; then mv "$tar.part" "$tar"; else FAILED="$FAILED\n  $src"; fi
+  if skopeo copy $flags "docker://$from" "oci-archive:$tar.part:$ref"; then mv "$tar.part" "$tar"
+  elif [ "$mode" = all ] && rm -f "$tar.part" && pull_with_crane "$from" "$ref" "$tar.part"; then mv "$tar.part" "$tar"; echo "      (built with crane: docker manifest list, digest preserved)"
+  else rm -f "$tar.part"; FAILED="$FAILED\n  $src"; fi
 done < <(grep -vE '^\s*(#|$)' airgap/images.txt | envsub TF_TAG BRAND_TAG)
 [ -z "$FAILED" ] || printf "\nFAILED images (see DEPLOY.md, step A5 notes):$FAILED\n\n"
 
@@ -42,11 +62,18 @@ curl -sfL -H "Authorization: Bearer $tok" -o "$BUNDLE_DIR/charts/nginx-ingress-1
 curl -fsSL -o "$BUNDLE_DIR/crds/gateway-api-standard-install-v1.3.0.yaml" https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.3.0/standard-install.yaml
 
 echo "== keycloak SPI jar + helm (linux-amd64) =="
-curl -fsSL -o "$BUNDLE_DIR/jars/keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar" \
- https://repo1.maven.org/maven2/io/github/mesutpiskin/keycloak-2fa-email-authenticator/26.5.0-KC26.7.3/keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar
+# chart 0.17.7 runs Keycloak 26.8.2 -> the jar must be the 26.8 build (chart default: keycloak.providers.plugins in values.yaml). 26.5.0-KC26.7.3 does NOT match.
+JAR=keycloak-2fa-email-authenticator-26.6.1-KC26.8.0.jar
+rm -f "$BUNDLE_DIR"/jars/keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar   # stale jar from an older bundle (would be picked up otherwise)
+[ -s "$BUNDLE_DIR/jars/$JAR" ] || curl -fsSL -o "$BUNDLE_DIR/jars/$JAR" "https://repo1.maven.org/maven2/io/github/mesutpiskin/keycloak-2fa-email-authenticator/26.6.1-KC26.8.0/$JAR"
+echo "0185f6ead8913792fdb4045cc0aef2753feb5cb71b9204372bf0d882f9435eb4  $BUNDLE_DIR/jars/$JAR" | shasum -a 256 -c -
 [ -x "$BUNDLE_DIR/tools/helm" ] || { curl -fsSL https://get.helm.sh/helm-v3.18.6-linux-amd64.tar.gz | tar -xz -C "$BUNDLE_DIR/tools" --strip-components=1 linux-amd64/helm; }
 
 [ -x "$BUNDLE_DIR/tools/kubectl" ] || { curl -fsSL -o "$BUNDLE_DIR/tools/kubectl" https://dl.k8s.io/release/v1.35.7/bin/linux/amd64/kubectl && chmod +x "$BUNDLE_DIR/tools/kubectl"; }
 
 echo "== done. total size:"; du -sh "$BUNDLE_DIR"
-n=$(ls "$BUNDLE_DIR"/tars/*.tar 2>/dev/null | wc -l); t=$(wc -l < "$BUNDLE_DIR/tars/INDEX"); echo "image tars: $n of $t"; [ "$n" = "$t" ] || echo "NOT COMPLETE: build the missing tars (minio: airgap/fetch-minio-from-acr.sh on the jumphost)"
+t=$(wc -l < "$BUNDLE_DIR/tars/INDEX" | tr -d ' '); n=0; STALE=""
+while IFS='|' read -r f _; do [ -s "$BUNDLE_DIR/tars/$f" ] && n=$((n+1)) || echo "MISSING TAR: $f"; done < "$BUNDLE_DIR/tars/INDEX"
+for f in "$BUNDLE_DIR"/tars/*.tar; do cut -d'|' -f1 "$BUNDLE_DIR/tars/INDEX" | grep -qxF "$(basename "$f")" || STALE="$STALE $(basename "$f")"; done
+echo "image tars: $n of $t"; [ "$n" = "$t" ] && echo "bundle COMPLETE" || echo "NOT COMPLETE: re-run this script (finished images are skipped); see the FAILED list above"
+[ -z "$STALE" ] || { echo "NOTE: $(echo $STALE | wc -w | tr -d ' ') stale tar(s) from an older release are not in INDEX (they are not loaded; delete them to keep the bundle small):"; for f in $STALE; do echo "  rm bundle/tars/$f"; done; }

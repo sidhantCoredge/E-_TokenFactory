@@ -1,3 +1,0 @@
-# Added when INGRESS_TLS=no: the Ingress carries no TLS block (plain HTTP, like tokenfactory-prod's live Ingress).
-ingress:
-  tls: []

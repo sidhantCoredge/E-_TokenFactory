@@ -19,15 +19,16 @@ ghcr.io/infinia-technology/ai-gateway-platform/tf-warden:${TF_TAG}     | infinia
 ghcr.io/infinia-technology/ai-gateway-platform/tf-portal-web:${BRAND_TAG} | infinia-technology/ai-gateway-platform/tf-portal-web:${BRAND_TAG} | amd64
 ghcr.io/infinia-technology/ai-gateway-platform/tf-admin-web:${BRAND_TAG}  | infinia-technology/ai-gateway-platform/tf-admin-web:${BRAND_TAG}  | amd64
 ghcr.io/infinia-technology/ai-gateway-platform/tf-site-web:${BRAND_TAG}   | infinia-technology/ai-gateway-platform/tf-site-web:${BRAND_TAG}   | amd64
-# ---- Umbrella-chart infra (helm template of chart 0.17.2 + values-tf-etisalat.yaml) ----
-quay.io/keycloak/keycloak@sha256:37dbaf6f0722c9ec246335f36e1ef8b2e6cb960f7c27e0d8c615121a3d475a85 | keycloak/keycloak@sha256:37dbaf6f0722c9ec246335f36e1ef8b2e6cb960f7c27e0d8c615121a3d475a85 | all
-docker.io/openfga/openfga:v1.8.9                                  | openfga/openfga:v1.8.9                                  | amd64
-docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z                | minio/minio:RELEASE.2025-09-07T16-13-09Z                | amd64
-docker.io/library/redis:7-alpine                                  | redis:7-alpine                                          | amd64
-docker.io/library/postgres:16-alpine                              | postgres:16-alpine                                      | amd64
+# ---- Umbrella-chart infra (helm template of chart 0.17.7 + values-tf-etisalat.yaml; every @sha256 below is what the chart renders) ----
+quay.io/keycloak/keycloak@sha256:3879c623248408de29a5303178b5816c77e8dfef3890c361f8c0bbeaa979ba3b | keycloak/keycloak@sha256:3879c623248408de29a5303178b5816c77e8dfef3890c361f8c0bbeaa979ba3b | all
+docker.io/openfga/openfga@sha256:b852071314f1fda1194d341a6ebac0a4f619b3cd87a6626d2ccc7048af4ec671 | openfga/openfga@sha256:b852071314f1fda1194d341a6ebac0a4f619b3cd87a6626d2ccc7048af4ec671 | all
+# MinIO: since chart 0.17.x the image is Infinia's own build on GHCR (the public minio/minio images were removed from Docker Hub/quay),
+# so it is fetched with the same GHCR read token as the tf-* images; fetch-minio-from-acr.sh is no longer needed.
+ghcr.io/infinia-technology/ai-gateway-platform/minio@sha256:1e1a2a508747eea22980ce1d8888d3e685518e5d9ba20f2e5a23a89a61b5c318 | ghcr.io/infinia-technology/ai-gateway-platform/minio@sha256:1e1a2a508747eea22980ce1d8888d3e685518e5d9ba20f2e5a23a89a61b5c318 | all
+docker.io/library/redis@sha256:c5d34a98396a4775e223c74e929162c35c5a2182901ba26b50ade939941ce14b | redis@sha256:c5d34a98396a4775e223c74e929162c35c5a2182901ba26b50ade939941ce14b | all
+docker.io/library/postgres@sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200f9d825139 | postgres@sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200f9d825139 | all
 docker.io/library/alpine:3.22                                     | alpine:3.22                                             | amd64
 docker.io/library/busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 | busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662 | all
-docker.io/coredgeio/postgres:15                                   | coredgeio/postgres:15                                   | amd64
 # ---- Zalando postgres-operator + Patroni/Spilo (HA Postgres `pgdb`) ----
 ghcr.io/zalando/postgres-operator:v1.14.0                         | zalando/postgres-operator:v1.14.0                       | amd64
 ghcr.io/zalando/spilo-17:4.0-p2                                   | zalando/spilo-17:4.0-p2                                 | amd64
@@ -36,6 +37,7 @@ docker.io/envoyproxy/gateway:v1.8.1                               | envoyproxy/g
 docker.io/envoyproxy/envoy:distroless-v1.38.1                     | envoyproxy/envoy:distroless-v1.38.1                     | amd64
 docker.io/envoyproxy/ai-gateway-controller:v1.0.0                 | envoyproxy/ai-gateway-controller:v1.0.0                 | amd64
 docker.io/envoyproxy/ai-gateway-extproc:v1.0.0                    | envoyproxy/ai-gateway-extproc:v1.0.0                    | amd64
+docker.io/envoyproxy/ratelimit:ff287602                                  | envoyproxy/ratelimit:ff287602                           | amd64
 # ---- OpenMeter stack (helm/infrastructure/openmeter) ----
 ghcr.io/openmeterio/openmeter:v1.0.0-beta.231@sha256:f3bc8075ebad57a0b02edf5f173892a9bcfbbda97af5481713fed892ef679f5f | openmeterio/openmeter:v1.0.0-beta.231@sha256:f3bc8075ebad57a0b02edf5f173892a9bcfbbda97af5481713fed892ef679f5f | all
 docker.io/svix/svix-server:v1.37                                  | svix/svix-server:v1.37                                  | amd64
@@ -46,7 +48,7 @@ docker.io/bitnamilegacy/kafka:3.8.1-debian-12-r0                  | bitnamilegac
 docker.io/bitnamilegacy/redis:7.4.1-debian-12-r0                  | bitnamilegacy/redis:7.4.1-debian-12-r0                  | amd64
 docker.io/library/busybox:1.37.0                                  | busybox:1.37.0                                          | amd64
 docker.io/alpine/k8s:1.35.5                                       | alpine/k8s:1.35.5                                       | amd64
-docker.io/curlimages/curl:8.23.0                                  | curlimages/curl:8.23.0                                  | amd64
+docker.io/curlimages/curl:8.23.0@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93 | curlimages/curl:8.23.0@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93 | all
 # ---- Ingress controller (F5 NGINX Ingress Controller 3.6.2, chart nginx-ingress 1.3.2 — same as prod-k8s) ----
 docker.io/nginx/nginx-ingress:3.6.2                               | nginx/nginx-ingress:3.6.2                               | amd64
 ghcr.io/infinia-technology/ai-gateway-platform/tf-docs-web:${TF_TAG} | infinia-technology/ai-gateway-platform/tf-docs-web:${BRAND_TAG} | amd64

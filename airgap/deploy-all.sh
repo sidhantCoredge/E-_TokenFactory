@@ -17,19 +17,24 @@ need(){ command -v "$1" >/dev/null 2>&1 || die "missing tool: $1"; }
 wait_for(){ # desc timeout_s cmd...
   local d="$1" t="$2"; shift 2; local s=$SECONDS
   until "$@" >/dev/null 2>&1; do [ $((SECONDS-s)) -gt "$t" ] && die "timeout (${t}s) waiting for: $d"; sleep 5; done; echo "  ok: $d"; }
-VARS='REGISTRY TF_TAG BRAND_TAG DOMAIN SUPPORT_EMAIL STORAGE_CLASS PLATFORM_ADMIN_EMAIL SMTP_HOST SMTP_PORT SMTP_USER KEYCLOAK_JAR_URL DOCS_WEB_ENABLED ENVOY_REPLICAS ENVOY_PDB_MIN_AVAILABLE KEYCLOAK_REPLICAS KEYCLOAK_MEM_REQUEST KEYCLOAK_MEM_LIMIT KEYCLOAK_HEAP TF_REPLICAS SITE_DOCS_REPLICAS INGRESS_ENABLED SMTP_SSL SMTP_STARTTLS INGRESS_TLS_SECRET'
+VARS='REGISTRY TF_TAG BRAND_TAG DOMAIN SUPPORT_EMAIL STORAGE_CLASS PLATFORM_ADMIN_EMAIL SMTP_HOST SMTP_PORT SMTP_USER KEYCLOAK_JAR_URL DOCS_WEB_ENABLED ENVOY_REPLICAS ENVOY_PDB_MIN_AVAILABLE KEYCLOAK_REPLICAS KEYCLOAK_MEM_REQUEST KEYCLOAK_MEM_LIMIT KEYCLOAK_HEAP INGRESS_ENABLED SMTP_SSL SMTP_STARTTLS INGRESS_TLS_SECRET TF_LEDGER_REPLICAS'
 # Keycloak SPI jar: empty KEYCLOAK_JAR_URL = host the bundled jar inside the cluster (phase `jar`)
-JAR_FILE="$(ls "$BUNDLE_DIR"/jars/*.jar 2>/dev/null | head -1 || true)"; JAR_INCLUSTER=0
+JAR_FILE="$(ls "$BUNDLE_DIR"/jars/*.jar 2>/dev/null | sort -V | tail -1 || true)"   # newest version if several jars are present; JAR_INCLUSTER=0
 if [ -z "${KEYCLOAK_JAR_URL:-}" ]; then JAR_INCLUSTER=1; KEYCLOAK_JAR_URL="http://keycloak-spi.${NAMESPACE}.svc.cluster.local:8080/$(basename "${JAR_FILE:-keycloak-2fa-email-authenticator.jar}")"; fi
 export KEYCLOAK_JAR_URL
 # defaults keep an older config.env working
-: "${ENVOY_REPLICAS:=6}" "${ENVOY_PDB_MIN_AVAILABLE:=1}" "${KEYCLOAK_REPLICAS:=3}" "${KEYCLOAK_MEM_REQUEST:=1Gi}" "${KEYCLOAK_MEM_LIMIT:=8Gi}"
-: "${KEYCLOAK_HEAP:=-Xms512m -Xmx2g -XX:+UseContainerSupport}" "${TF_REPLICAS:=3}" "${SITE_DOCS_REPLICAS:=1}" "${INGRESS_ENABLED:=true}"
+: "${ENVOY_REPLICAS:=6}" "${ENVOY_PDB_MIN_AVAILABLE:=1}" "${KEYCLOAK_REPLICAS:=3}" "${KEYCLOAK_MEM_REQUEST:=1Gi}" "${KEYCLOAK_MEM_LIMIT:=2Gi}"
+: "${KEYCLOAK_HEAP:=-Xms512m -Xmx2g -XX:+UseContainerSupport}" "${INGRESS_ENABLED:=true}"
 : "${SMTP_SSL:=true}" "${SMTP_STARTTLS:=false}" "${EXPOSE:=loadbalancer}" "${BEHIND_CLOUDFLARE:=no}" "${INGRESS_TLS:=yes}" "${INGRESS_TLS_SECRET:=tf-etisalat-tls}"   # older config.env keeps the old behaviour
-: "${PG_INSTANCES:=3}" "${PG_VOLUME_SIZE:=20Gi}" "${PG_CPU_REQUEST:=1}" "${PG_MEM_REQUEST:=2Gi}" "${PG_CPU_LIMIT:=4}" "${PG_MEM_LIMIT:=8Gi}" "${PG_MAX_CONNECTIONS:=300}"
-export ENVOY_REPLICAS ENVOY_PDB_MIN_AVAILABLE KEYCLOAK_REPLICAS KEYCLOAK_MEM_REQUEST KEYCLOAK_MEM_LIMIT KEYCLOAK_HEAP TF_REPLICAS SITE_DOCS_REPLICAS INGRESS_ENABLED SMTP_SSL SMTP_STARTTLS INGRESS_TLS_SECRET
+: "${PG_VERSION:=16}" "${KEYCLOAK_ANTIAFFINITY:=required}" "${PG_INSTANCES:=3}" "${PG_VOLUME_SIZE:=20Gi}" "${PG_CPU_REQUEST:=1}" "${PG_MEM_REQUEST:=2Gi}" "${PG_CPU_LIMIT:=4}" "${PG_MEM_LIMIT:=8Gi}" "${PG_MAX_CONNECTIONS:=300}"
+export ENVOY_REPLICAS ENVOY_PDB_MIN_AVAILABLE KEYCLOAK_REPLICAS KEYCLOAK_MEM_REQUEST KEYCLOAK_MEM_LIMIT KEYCLOAK_HEAP INGRESS_ENABLED SMTP_SSL SMTP_STARTTLS INGRESS_TLS_SECRET
+# per-service replicas + CPU/RAM (defaults = live xailon-tf-prod values; an older config.env without these lines still works)
+: "${SVC_TF_ACCOUNTS:=3 50m 64Mi 200m 256Mi}" "${SVC_TF_ADMIN_WEB:=3 none}" "${SVC_TF_AUTH:=3 none}" "${SVC_TF_BABEL:=3 25m 32Mi 300m 256Mi}" "${SVC_TF_CONTROL:=3 none}"
+: "${SVC_TF_DOCS_WEB:=1 50m 96Mi 300m 256Mi}" "${SVC_TF_LEDGER:=3 none}" "${SVC_TF_OPS:=3 20m 48Mi 250m 128Mi}" "${SVC_TF_PORTAL_WEB:=3 50m 32Mi 200m 1Gi}" "${SVC_TF_RELAY:=3 none}"
+: "${SVC_TF_SHIM:=3 25m 256Mi 1 1Gi}" "${SVC_TF_SITE_WEB:=1 50m 64Mi 300m 256Mi}" "${SVC_TF_WARDEN:=3 none}"
+: "${RES_OPENFGA:=- 64Mi - 256Mi}" "${RES_MINIO:=50m 128Mi 300m 512Mi}" "${RES_REDIS:=100m 1Gi 1 4Gi}"
 INST_DEF="$PG_INSTANCES"; [ "${SINGLE_NODE:-no}" = yes ] && INST_DEF=1
-PG_SET=(--set registry="$REGISTRY" --set volume.storageClass="$STORAGE_CLASS" --set numberOfInstances="$INST_DEF" --set-string volume.size="$PG_VOLUME_SIZE"
+PG_SET=(--set registry="$REGISTRY" --set-string postgresVersion="$PG_VERSION" --set volume.storageClass="$STORAGE_CLASS" --set numberOfInstances="$INST_DEF" --set-string volume.size="$PG_VOLUME_SIZE"
         --set-string resources.requests.cpu="$PG_CPU_REQUEST" --set-string resources.requests.memory="$PG_MEM_REQUEST"
         --set-string resources.limits.cpu="$PG_CPU_LIMIT" --set-string resources.limits.memory="$PG_MEM_LIMIT" --set-string parameters.max_connections="$PG_MAX_CONNECTIONS")
 DRY=0
@@ -45,13 +50,14 @@ phase_check(){
   [ -z "$bad" ] || die "config.env still has REPLACE_ values:"$'\n'"$bad"
   for v in REGISTRY NAMESPACE DOMAIN TF_TAG BRAND_TAG STORAGE_CLASS SMTP_HOST SMTP_PORT SMTP_USER CH_DATA_SIZE CH_LOG_SIZE; do [ -n "${!v:-}" ] || die "config.env: $v is empty"; done
   case "$REGISTRY" in *://*) die "REGISTRY must be host[:port] without scheme";; esac
-  if [ "$INGRESS_TLS" = yes ] || [ "$BEHIND_CLOUDFLARE" != yes ]; then
+  [ "$INGRESS_TLS" = yes ] || die "INGRESS_TLS must be yes: this package deploys the Ingress with TLS only (chart >= 0.17 refuses a plain-HTTP Ingress)"
+  if true; then   # TLS certificate is always required (Ingress TLS Secret, and Envoy TLS when BEHIND_CLOUDFLARE=no)
     [ -f "${TLS_CERT:-}" ] && [ -f "${TLS_KEY:-}" ] || die "a TLS certificate is needed (INGRESS_TLS=yes or BEHIND_CLOUDFLARE=no): TLS_CERT / TLS_KEY files not found"
     openssl x509 -in "$TLS_CERT" -noout -checkend 0 >/dev/null || die "TLS certificate is expired"
     [ "$(openssl x509 -in "$TLS_CERT" -noout -pubkey | openssl sha256)" = "$(openssl pkey -in "$TLS_KEY" -pubout 2>/dev/null | openssl sha256)" ] || die "TLS_CERT and TLS_KEY do not belong together"
   fi
   if [ "$NODE_LOAD_MODE" = ssh ] && [ "${IMAGE_MODE:-tar}" = tar ]; then [ -n "${NODES// /}" ] || die "NODE_LOAD_MODE=ssh needs NODES in config.env"; fi
-  [ -d "$REPO/helm/tokenfactory" ] || die "repo not found at $REPO (unpack bundle/repo/ai-gateway-platform.tgz next to config.env)"
+  [ -d "$REPO/helm/tokenfactory" ] || die "repo not found at $REPO (run airgap/00-fetch-chart.sh on the Mac and copy the whole folder to the VM)"
   for f in charts/gateway-helm-v1.8.1.tgz charts/ai-gateway-crds-helm-v1.0.0.tgz charts/ai-gateway-helm-v1.0.0.tgz charts/nginx-ingress-1.3.2.tgz crds/gateway-api-standard-install-v1.3.0.yaml; do [ -f "$BUNDLE_DIR/$f" ] || die "bundle file missing: $f"; done
   if [ $DRY = 0 ]; then
     kubectl version --request-timeout=10s >/dev/null 2>&1 || die "kubectl cannot reach the cluster"
@@ -76,10 +82,45 @@ phase_images(){
 phase_prepare(){
   log "prepare (patch hardcoded images, ingress template, vendor subcharts)"
   REPO="$REPO" REGISTRY="$REGISTRY" STORAGE_CLASS="$STORAGE_CLASS" CH_DATA_SIZE="$CH_DATA_SIZE" CH_LOG_SIZE="$CH_LOG_SIZE" ./03-patch-hardcoded-images.sh
-  if [ -f "$REPO/helm/tokenfactory/templates/ingress.yaml" ]; then echo "  ingress template already present"
-  elif [ -f "$ROOT/patches/0001-umbrella-ingress-template-pr678.patch" ]; then (cd "$REPO" && patch -p1 < "$ROOT/patches/0001-umbrella-ingress-template-pr678.patch") && echo "  ingress template applied (PR #678)"
-  else die "helm/tokenfactory/templates/ingress.yaml is missing in $REPO. Use a checkout that contains PR #678 (Ingress template + values.yaml 'ingress:' block), or place the patch in $ROOT/patches/"; fi
+  [ -f "$REPO/helm/tokenfactory/templates/ingress.yaml" ] || die "helm/tokenfactory/templates/ingress.yaml is missing in $REPO: the chart checkout is not the pinned release (run airgap/00-fetch-chart.sh on the Mac and copy the folder again)"
+  echo "  ingress template present"
   (cd "$REPO/helm/tokenfactory" && helm dependency build >/dev/null) && echo "  umbrella subcharts vendored (file:// only)"
+}
+
+
+# ---- rendered/services.yaml: replicas + CPU/RAM of every tf-* service and of openfga/minio/redis, Keycloak anti-affinity (all from config.env) ----
+res_yaml(){ # INDENT CPU_REQ MEM_REQ CPU_LIM MEM_LIM | INDENT none     ("-" = leave that value out)
+  local i="$1"; shift
+  if [ "${1:-}" = none ]; then printf '%sresources:\n%s  requests: null\n%s  limits: null\n' "$i" "$i" "$i"; return; fi
+  [ $# -eq 4 ] || die "bad resources spec '$*' (need: cpu-request mem-request cpu-limit mem-limit, or none)"
+  local rq="" lm=""
+  [ "$1" = - ] || rq="cpu: \"$1\""; [ "$2" = - ] || rq="${rq:+$rq, }memory: \"$2\""
+  [ "$3" = - ] || lm="cpu: \"$3\""; [ "$4" = - ] || lm="${lm:+$lm, }memory: \"$4\""
+  printf '%sresources:\n' "$i"
+  printf '%s  requests: { %s }\n' "$i" "$rq"; printf '%s  limits: { %s }\n' "$i" "$lm"
+}
+gen_services(){
+  local f="$OUT/services.yaml" n var spec rep
+  { echo "# generated by deploy-all.sh render from config.env (SVC_* / RES_* / KEYCLOAK_ANTIAFFINITY). Do not edit: change config.env."
+    for n in tf-accounts tf-admin-web tf-auth tf-babel tf-control tf-docs-web tf-ledger tf-ops tf-portal-web tf-relay tf-shim tf-site-web tf-warden; do
+      var="SVC_$(echo "$n" | tr 'a-z-' 'A-Z_' | sed 's/^TF_/TF_/')"; spec="${!var}"
+      set -- $spec; [ $# -ge 2 ] || die "$var='$spec': need '<replicas> none' or '<replicas> cpu-req mem-req cpu-lim mem-lim'"
+      rep="$1"; shift; case "$rep" in ''|*[!0-9]*) die "$var: replicas '$rep' is not a number";; esac
+      echo "$n:"; [ "$n" = tf-docs-web ] && echo "  enabled: $DOCS_WEB_ENABLED"
+      echo "  replicas: $rep"; res_yaml "  " "$@"
+    done
+    for n in openfga minio redis; do var="RES_$(echo $n | tr a-z A-Z)"; set -- ${!var}; echo "$n:"; res_yaml "  " "$@"; done
+    local mode="$KEYCLOAK_ANTIAFFINITY"; [ "${SINGLE_NODE:-no}" = yes ] && mode=preferred
+    echo "keycloak:"; echo "  affinity:"; echo "    podAntiAffinity:"
+    if [ "$mode" = required ]; then
+      echo "      requiredDuringSchedulingIgnoredDuringExecution:"
+      echo "        - topologyKey: kubernetes.io/hostname"; echo "          labelSelector:"; echo "            matchLabels: { app.kubernetes.io/name: keycloak }"
+    else
+      echo "      preferredDuringSchedulingIgnoredDuringExecution:"
+      echo "        - weight: 100"; echo "          podAffinityTerm:"; echo "            topologyKey: kubernetes.io/hostname"; echo "            labelSelector:"; echo "              matchLabels: { app.kubernetes.io/name: keycloak }"
+    fi
+  } > "$f"
+  echo "  services.yaml generated (replicas/CPU/RAM from config.env, Keycloak anti-affinity: $mode)"
 }
 
 phase_render(){
@@ -89,12 +130,13 @@ phase_render(){
     envsub $VARS < "$ROOT/values/$n.values.yaml.tmpl" > "$OUT/$n.yaml"
     ! grep -q '\${' "$OUT/$n.yaml" || die "unreplaced \${VAR} in $OUT/$n.yaml: $(grep -n '\${' "$OUT/$n.yaml" | head -2)"
   done
+  gen_services
   if [ -n "${CUSTOM_VALUES_YAML//[[:space:]]/}" ]; then printf '%s\n' "$CUSTOM_VALUES_YAML" > "$OUT/custom.yaml"; echo "  custom values from config.env CUSTOM_VALUES_YAML applied"; else echo '{}' > "$OUT/custom.yaml"; fi
   if [ "$EXPOSE" = clusterip ]; then cp "$ROOT/values/expose-clusterip.umbrella.yaml" "$OUT/lb-umbrella.yaml"; cp "$ROOT/values/expose-clusterip.nginx.yaml" "$OUT/lb-nginx.yaml"
   elif [ "${LB_INTERNAL:-no}" = yes ]; then cp "$ROOT/values/lb-internal.umbrella.yaml" "$OUT/lb-umbrella.yaml"; cp "$ROOT/values/lb-internal.nginx.yaml" "$OUT/lb-nginx.yaml"
   else cp "$ROOT/values/lb-none.yaml" "$OUT/lb-umbrella.yaml"; cp "$ROOT/values/lb-none.yaml" "$OUT/lb-nginx.yaml"; fi
   if [ "$BEHIND_CLOUDFLARE" = yes ]; then cp "$ROOT/values/edge-cloudflare.yaml" "$OUT/edge.yaml"; else echo '{}' > "$OUT/edge.yaml"; fi
-  if [ "$INGRESS_TLS" = yes ]; then echo '{}' > "$OUT/tlsmode.yaml"; else cp "$ROOT/values/ingress-notls.yaml" "$OUT/tlsmode.yaml"; fi
+  echo '{}' > "$OUT/tlsmode.yaml"   # Ingress is always TLS (INGRESS_TLS=yes is enforced in `check`)
   echo "  rendered values (no secrets inside); LB_INTERNAL=${LB_INTERNAL:-no}"
 }
 
@@ -249,7 +291,7 @@ phase_app(){
   kubectl -n "$NAMESPACE" get secret tokenfactory-secrets tf-etisalat-tls >/dev/null || die "tokenfactory-secrets / tf-etisalat-tls missing in $NAMESPACE"
   echo "  pre-install checks ok (CRDs, OpenMeter API, secrets)"
   SKIP_PREFLIGHT=1 CHART_DIR="$REPO/helm/tokenfactory" RELEASE=tokenfactory NAMESPACE="$NAMESPACE" VALUES="$REPO/helm/tokenfactory/values-tf-etisalat.yaml" \
-    HELM_ARGS="-f $OUT/umbrella.yaml -f $OUT/lb-umbrella.yaml -f $OUT/edge.yaml -f $OUT/tlsmode.yaml -f $OUT/custom.yaml -f $OUT/service-keys.yaml --timeout 30m" \
+    HELM_ARGS="-f $OUT/umbrella.yaml -f $OUT/services.yaml -f $OUT/lb-umbrella.yaml -f $OUT/edge.yaml -f $OUT/tlsmode.yaml -f $OUT/custom.yaml -f $OUT/service-keys.yaml --timeout 30m" \
     "$REPO/helm/setup/scripts/install.sh"
 }
 
@@ -286,7 +328,7 @@ phase_dryrun(){
   T nginx-ingress "$C/nginx-ingress-1.3.2.tgz" -n nginx-ingress -f "$OUT/nginx-ingress.yaml" -f "$OUT/lb-nginx.yaml"
   T openmeter "$REPO/helm/infrastructure/openmeter" -n openmeter -f "$OUT/openmeter.yaml" --set openmeter.clickhouseCredentials.existingSecretName=om-clickhouse-pw --set openmeter.config.postgres.url=x --set openmeter.svix.database.dsn=x
   write_service_keys dryrun dryrun dryrun dryrun dryrun
-  T tokenfactory "$REPO/helm/tokenfactory" -n "$NAMESPACE" -f "$REPO/helm/tokenfactory/values-tf-etisalat.yaml" -f "$OUT/umbrella.yaml" -f "$OUT/lb-umbrella.yaml" -f "$OUT/edge.yaml" -f "$OUT/tlsmode.yaml" -f "$OUT/custom.yaml" -f "$OUT/service-keys.yaml" \
+  T tokenfactory "$REPO/helm/tokenfactory" -n "$NAMESPACE" -f "$REPO/helm/tokenfactory/values-tf-etisalat.yaml" -f "$OUT/umbrella.yaml" -f "$OUT/services.yaml" -f "$OUT/lb-umbrella.yaml" -f "$OUT/edge.yaml" -f "$OUT/tlsmode.yaml" -f "$OUT/custom.yaml" -f "$OUT/service-keys.yaml" \
     --set-file keycloak.theme.archive="$REPO/brands/etisalat/keycloak/theme.tar.gz.b64"
   log "dry-run PASSED - safe to run: ./deploy-all.sh all"
 }

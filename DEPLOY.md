@@ -15,156 +15,190 @@ Lab note: a 1-node cluster cannot hold 3 Postgres instances, so the lab uses `SI
 ---
 ## STEP 0 — Things you need before starting
 1. A **GitHub token (PAT) with `read:packages`** that can read `ghcr.io/infinia-technology/*` (the tf-* images are private). The token saved on your Mac is invalid.
-2. Two image tags: `TF_TAG` (release `0.17.2` = `0.17.2-356be61`) and `BRAND_TAG` (the **Etisalat-branded** web images, looks like `0.17.2-etisalat-abc1234`; it MUST end in a 7-character git sha). Step A3 finds them. *If no `-etisalat-` tag exists, the images were never built — ask the developer to run the Etisalat brand build first; nothing can be deployed without them.*
+2. Two image tags, both in `config.env`: `TF_TAG` (release **0.17.7** = `0.17.7-160792b`, chart 0.17.7 from branch `stage`) and `BRAND_TAG` (the **Etisalat-branded** web images, `<version>-etisalat-<7-char sha>`). Today the only Etisalat-branded web build in GHCR is `0.17.0-etisalat-6b27a33` (checked 10 Nov 2026), so `BRAND_TAG` stays on it: the portal/admin/site UIs are the 0.17.0 branded build running against 0.17.7 services. When the developer builds `0.17.7-etisalat-<sha>`, put it in `BRAND_TAG` and rebuild the bundle. Step A4 checks both tags exist.
 3. Lab only: the cluster exists (`~/etisalat.kubeconfig` on the install VM works: `kubectl --kubeconfig ~/etisalat.kubeconfig get nodes` shows 1 Ready node).
 
 ---
 ## PART A — [MAC] build the bundle (needs internet)
+This git repo holds scripts, values and docs only. Two things are **not** in git (private or huge) and are created here, git-ignored: `ai-gateway-platform/` (the chart checkout, pinned to one commit) and `bundle/` (image tars, charts, CRDs, Keycloak jar, linux `helm`/`kubectl`). Both are copied to the install VM in A6.
 
 **A1. Tools**
 ```
-brew install skopeo helm
+brew install skopeo crane helm git
 ```
-**A2. Log in** (Docker Hub avoids rate limits; ghcr needs your PAT as the password)
+**A2. Log in** (Docker Hub avoids rate limits; ghcr needs your PAT as the password). You also need git access (SSH key) to `Infinia-Technology/ai-gateway-platform`
 ```
 skopeo login docker.io
 skopeo login ghcr.io -u <your-github-username>
 ```
-**A3. Find the tags** (replace nothing, just run)
+**A3. Fetch the chart checkout** (pinned: `CHART_REPO` / `CHART_REF` in `config.env` = branch `stage`, chart 0.17.7). It also refuses a `TF_TAG` that does not start with the chart version
 ```
-skopeo list-tags docker://ghcr.io/infinia-technology/ai-gateway-platform/tf-portal-web | tr ',' '\n' | grep -E 'etisalat' | tail -5
-skopeo inspect --no-tags docker://ghcr.io/infinia-technology/ai-gateway-platform/tf-accounts:0.17.2-356be61 >/dev/null && echo "TF_TAG ok"
+cd <this package folder>
+airgap/00-fetch-chart.sh                  # ends with: ok: chart checkout complete
 ```
-**A4. Edit `~/Downloads/ethisalat/config.env`** — only these two lines now:
+**A4. Check the two image tags exist** (nothing to edit unless you move to a newer release: then change `TF_TAG`, `BRAND_TAG` and `CHART_REF` together in `config.env`)
 ```
-export TF_TAG="0.17.2-356be61"
-export BRAND_TAG="<the etisalat tag from A3>"
+. airgap/env.sh
+skopeo inspect --no-tags docker://ghcr.io/infinia-technology/ai-gateway-platform/tf-accounts:$TF_TAG >/dev/null && echo "TF_TAG ok"
+skopeo inspect --no-tags docker://ghcr.io/infinia-technology/ai-gateway-platform/tf-portal-web:$BRAND_TAG >/dev/null && echo "BRAND_TAG ok"
 ```
-**A5. Build the bundle** (≈ 8–10 GB, 30–60 min, safe to re-run if it stops)
+**A5. Build the bundle** (≈ 5 GB, 20–60 min, safe to re-run if it stops: finished images are skipped)
 ```
-cd ~/Downloads/ethisalat
 airgap/01-bundle-connected.sh
 ```
-It ends with `== done. total size:` and `image tars: 37 of 38`. **The one missing tar is MinIO** — its public images were removed from Docker Hub and quay.io (that is why the script prints one `FAILED images` entry). It is created in step A7. Anything else listed as FAILED is a real error: fix it and re-run A5 (finished images are skipped).
+It ends with `== done. total size:` and `image tars: 38 of 38`. Anything listed as `FAILED images` is a real error: fix it and re-run (finished images are skipped). Every image the chart renders is in `airgap/images.txt` (checked by rendering all releases with `helm template`).
 Result: `bundle/tars/*.tar`, `bundle/charts`, `bundle/crds`, `bundle/jars` (the Keycloak plugin jar, see B4), `bundle/tools/helm` and `bundle/tools/kubectl` (Linux binaries for the air-gap side).
 
-**A6. Copy everything to the install VM** (resumable). First time as written; when you copy again later add `--exclude config.env` so your filled-in file on the VM is not overwritten
+**A6. Copy everything to the install VM** (resumable; the folder includes the git-ignored `ai-gateway-platform/` and `bundle/`). First time as written; when you copy again later add `--exclude config.env` so your filled-in file on the VM is not overwritten
 ```
-rsync -avP --exclude .git --exclude E-_TokenFactory ~/Downloads/ethisalat/ <vm-user>@<VM-IP>:~/etisalat/
-# lab: rsync -avP --exclude .git --exclude E-_TokenFactory -e "ssh -i ~/.ssh/id_rsa_jumphost" ~/Downloads/ethisalat/ azureuser@10.40.1.4:~/etisalat/
+rsync -avP --exclude .git --exclude Real-values-of-tf-prod.yaml <this package folder>/ <vm-user>@<VM-IP>:~/etisalat/
+# lab: rsync -avP --exclude .git -e "ssh -i ~/.ssh/id_rsa_jumphost" <this package folder>/ azureuser@10.40.1.4:~/etisalat/
 # no network path Mac -> VM (real air-gap)? copy the folder on a USB disk / approved transfer, then `tar -xf` it as ~/etisalat on the VM
 ```
-**A7. [VM] Create the MinIO tar** (the only image the Mac cannot fetch). The VM can reach the ACR `acrtokenfactory` that still holds it; the script talks to the ACR REST API, no docker/skopeo needed:
-```
-ssh <vm-user>@<VM-IP>          # lab: ssh -i ~/.ssh/id_rsa_jumphost azureuser@10.40.1.4
-cd ~/etisalat && airgap/fetch-minio-from-acr.sh      # ends with: wrote .../minio_minio_RELEASE.2025-09-07T16-13-09Z.tar
-ls bundle/tars/*.tar | wc -l                          # must print 38
-```
-(Real Etisalat: they have no ACR — run this on any host that can reach a registry holding `minio/minio:RELEASE.2025-09-07T16-13-09Z` (edit `MINIO_ACR`), or `docker save` the image on a connected host, and drop the file at that path with the image name `registry.etisalat.local/minio/minio:RELEASE.2025-09-07T16-13-09Z`.)
+(MinIO needs no special step any more: since chart 0.17.x its image is Infinia's own build on GHCR and is bundled like the tf-* images.)
 
 ---
-## PART B — [VM] deploy
+## PART B — [VM] deploy on the real Etisalat cluster (every command, in order)
+Run everything below **on the install VM**, as the user that owns `~/etisalat`. Lab differences (Azure jumphost, 1 node) are in Part B-LAB at the end of this part.
 
-**B1. Log in**
+### B0. The cluster this package targets
+**The cluster** (7 VMs on 2 physical hosts) — images are loaded on the 4 workers; Postgres (3), Keycloak (3), Kafka (3) and Envoy (6) spread over them:
+| IP | Name | Role | Host |
+|---|---|---|---|
+| 172.22.100.11 | ed-kca-inf-tf-cn-01 | control (management host) | ED-KCA-INF-TF-CPU-01 |
+| 172.22.100.12 | ed-kca-inf-tf-cn-02 | control (management host) | ED-KCA-INF-TF-CPU-02 |
+| 172.22.100.23 | ed-kca-inf-tf-cn-03 | control node (VM) | ED-KCA-INF-TF-CPU-02 |
+| 172.22.100.24 | ed-kca-inf-tf-cpu-wrk-001 | CPU worker | ED-KCA-INF-TF-CPU-01 |
+| 172.22.100.25 | ed-kca-inf-tf-cpu-wrk-002 | CPU worker | ED-KCA-INF-TF-CPU-01 |
+| 172.22.100.26 | ed-kca-inf-tf-cpu-wrk-003 | CPU worker | ED-KCA-INF-TF-CPU-02 |
+| 172.22.100.27 | ed-kca-inf-tf-cpu-wrk-004 | CPU worker | ED-KCA-INF-TF-CPU-02 |
+Check which nodes accept pods with `kubectl get nodes` and `kubectl describe node <n> | grep Taints`; load images on every node that can run pods (normally only the 4 workers).
+
+* Needed from Etisalat before you start: the cluster admin kubeconfig, SSH access from the install VM to the 4 workers with passwordless `sudo`, a StorageClass that allows volume expansion, the TLS certificate + key (PEM) that cover `portal. admin. www. auth.<DOMAIN>`, the Resend API key (`SMTP_PASSWORD`), and the Cloudflare tunnel (Part M).
+* **Firewall (outbound from the workers):** `tcp/465` to `smtp.resend.com` (mail) and `https` to `api.resend.com`. Nothing else leaves the cluster: GeoIP downloads are off, Persona KYC is off, no image is ever pulled from the Internet (images are loaded from the tars).
+* **Inbound:** only the Cloudflare tunnel (`cloudflared` inside the cluster, Part M) reaches the Envoy and ingress Services. Do not expose them any other way.
+
+### B1. Log in and enter the package
 ```
-ssh <vm-user>@<VM-IP>          # lab: ssh -i ~/.ssh/id_rsa_jumphost azureuser@10.40.1.4
+ssh <vm-user>@<VM-IP>
 cd ~/etisalat
-export VM_IP=<this VM's IP as the cluster nodes see it>      # lab: 10.40.1.4
+ls                                  # must show: airgap  ai-gateway-platform  bundle  config.env  values  zalando  DEPLOY.md
 ```
-**B2. Check prerequisites.** Nothing has to be installed on this machine: `kubectl` and `helm` come inside the bundle (`bundle/tools/`, the scripts put them on PATH automatically). The only other things needed are standard on every Ubuntu/RHEL server: `bash perl python3 openssl tar`. Verify:
+### B2. Check prerequisites (nothing is installed on this VM: `kubectl` and `helm` come inside the bundle)
 ```
-ls ~/etisalat.kubeconfig && ~/etisalat/bundle/tools/kubectl --kubeconfig ~/etisalat.kubeconfig get nodes
-for t in perl python3 openssl tar; do command -v $t >/dev/null && echo "ok $t" || echo "MISSING $t"; done
+for t in bash perl python3 openssl tar ssh scp; do command -v $t >/dev/null && echo "ok $t" || echo "MISSING $t"; done
 ls ai-gateway-platform/helm/tokenfactory/templates/ingress.yaml bundle/tars/INDEX bundle/tools/helm bundle/tools/kubectl bundle/jars/*.jar
+ls bundle/tars/*.tar | wc -l                      # must print 38
+cp <path-of-the-cluster-admin-kubeconfig> ~/etisalat.kubeconfig && chmod 600 ~/etisalat.kubeconfig
+export PATH=~/etisalat/bundle/tools:$PATH
+kubectl --kubeconfig ~/etisalat.kubeconfig get nodes -o wide        # all nodes Ready; note the 4 worker names/IPs
+kubectl --kubeconfig ~/etisalat.kubeconfig get nodes --no-headers | grep -c ' Ready'      # >= 3
+kubectl --kubeconfig ~/etisalat.kubeconfig get sc                    # pick the StorageClass for STORAGE_CLASS
+kubectl --kubeconfig ~/etisalat.kubeconfig get sc <name> -o jsonpath='{.allowVolumeExpansion}{"\n"}'      # must print true
+kubectl --kubeconfig ~/etisalat.kubeconfig describe node <worker> | grep -i taints     # workers must accept normal pods (Taints: <none>)
 ```
-If a tool really is missing on a brand-new VM, install it from the OS media/package mirror of that VM (only `perl`/`python3`/`openssl` are ever needed). `make`, `envsubst` and `skopeo` are NOT needed in the air-gap.
-(Lab only, if the kubeconfig is missing: `az aks get-credentials -g rg-tokenfactory -n aks-etisalat-test --admin --file ~/etisalat.kubeconfig`.)
-
-**B3. TLS certificate.** Real Etisalat: use **your own certificate and key** (the files you already have, PEM) — they become the Ingress TLS Secret (Part C). Lab: make a self-signed wildcard instead:
+If a tool is missing (only `perl`, `python3`, `openssl` are ever needed) install it from the VM's OS package mirror. `make`, `envsubst`, `skopeo` are NOT needed here.
+### B3. SSH from the VM to every worker (the image loader uses it) — passwordless `sudo` is required
 ```
-openssl req -x509 -newkey rsa:2048 -nodes -days 30 -keyout ~/wild.key -out ~/wild.crt -subj "/CN=*.etisalat.lab" -addext "subjectAltName=DNS:*.etisalat.lab,DNS:etisalat.lab"
+ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519      # only if the VM has no key yet
+for ip in 172.22.100.24 172.22.100.25 172.22.100.26 172.22.100.27; do ssh-copy-id <ssh-user>@$ip; done
+for ip in 172.22.100.24 172.22.100.25 172.22.100.26 172.22.100.27; do ssh -o BatchMode=yes <ssh-user>@$ip 'sudo -n true && which ctr && echo "$(hostname): ok"'; done
 ```
-**B4. Keycloak plugin jar — nothing to download, it is inside the bundle.**
-* **What it is:** `keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar` (Maven Central, `mesutpiskin`) — **exactly the jar tokenfactory-prod and the Xailon PR #678 use**, and it **is valid for Etisalat**: it matches the Keycloak 26.7 line, the Keycloak image in this bundle is **26.7.5** (Xailon runs the same jar on 26.7.4). `tf-auth` needs it (it wires the email-OTP step and refuses to start without it). We do not build it. *Pairing rule:* the jar must match the Keycloak version of the chart you deploy. Newer prod values (chart ≥ 0.17.3, Keycloak 26.8.x) use `26.6.1-KC26.8.0`; this package's chart 0.17.2 ships Keycloak **26.7.5**, so `26.5.0-KC26.7.3` is the right one. When you move to a newer chart, take the jar URL from that chart's `values-tf-prod.yaml` (`keycloak.providers.plugins`) and put that file in `bundle/jars/`.
+Every line must end with `<hostname>: ok`. If `ctr` is not found, containerd's CLI is missing: install `containerd` tools on that node or use another way to import the tars (B6b).
+### B4a. TLS certificate and key
+Your own files (PEM, certificate chain first): copy them to the VM and verify before you continue.
+```
+mkdir -p ~/etisalat-tls && cp <etisalat.crt> ~/etisalat-tls/tls.crt && cp <etisalat.key> ~/etisalat-tls/tls.key && chmod 600 ~/etisalat-tls/tls.key
+openssl x509 -in ~/etisalat-tls/tls.crt -noout -subject -enddate                         # not expired
+openssl x509 -in ~/etisalat-tls/tls.crt -noout -ext subjectAltName                       # must cover portal. admin. www. auth.<DOMAIN> (or *.<DOMAIN>)
+[ "$(openssl x509 -in ~/etisalat-tls/tls.crt -noout -pubkey | openssl sha256)" = "$(openssl pkey -in ~/etisalat-tls/tls.key -pubout | openssl sha256)" ] && echo "cert and key match"
+```
+### B4b. Keycloak plugin jar — nothing to download, it is inside the bundle
+* **What it is:** `keycloak-2fa-email-authenticator-26.6.1-KC26.8.0.jar` (Maven Central, `mesutpiskin`): the chart default (`keycloak.providers.plugins` in the chart's `values.yaml`). `tf-auth` needs it (it wires the email-OTP step and refuses to start without it). We do not build it. *Pairing rule:* the jar must match the Keycloak version of the chart you deploy. Chart 0.17.7 runs Keycloak **26.8.2** (image digest `sha256:3879c623…`), so the 26.8 jar above is the right one; the old `26.5.0-KC26.7.3` jar belongs to Keycloak 26.7 and must NOT be used. When you move to a newer chart, take the jar URL from that chart's `values.yaml` and put that file in `bundle/jars/` (the newest version in `bundle/jars/` is used).
 * **Where it comes from:** step A5 downloads it on the Mac into `bundle/jars/`; the whole `bundle/` folder reaches the VM with A6. It is **not in the git repo** (the repo has no `bundle/`).
-* **Check it on the VM** (size 90807 bytes):
+* **Check it on the VM** (size 92437 bytes):
   ```
   cd ~/etisalat/bundle/jars && ls -l *.jar && sha256sum *.jar
-  # 8b478b84e0ab1e812f7d512c648f37ef9fbb9154343be373e7127fcfa0c9d3ba  keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar
+  # 0185f6ead8913792fdb4045cc0aef2753feb5cb71b9204372bf0d882f9435eb4  keycloak-2fa-email-authenticator-26.6.1-KC26.8.0.jar
   ```
   If the folder is empty (the download in A5 failed), open this URL on any machine with internet and put the file into `bundle/jars/`:
-  `https://repo1.maven.org/maven2/io/github/mesutpiskin/keycloak-2fa-email-authenticator/26.5.0-KC26.7.3/keycloak-2fa-email-authenticator-26.5.0-KC26.7.3.jar`
+  `https://repo1.maven.org/maven2/io/github/mesutpiskin/keycloak-2fa-email-authenticator/26.6.1-KC26.8.0/keycloak-2fa-email-authenticator-26.6.1-KC26.8.0.jar`
   Without the jar `airgap/deploy-all.sh check` stops with *"no Keycloak jar in …/jars"*.
 * **How Keycloak gets it in the air-gap:** `KEYCLOAK_JAR_URL` is **empty** in `config.env` (leave it empty; the Maven Central URL only works with internet). Phase `jar` of B7 puts the file into ConfigMap `keycloak-spi-jar` and serves it with **2 tiny busybox `httpd` pods behind Service `keycloak-spi`** in namespace `tokenfactory`. Every Keycloak pod (all 3 of the HA set) downloads it from there in its init container `fetch-providers` when it starts.
 * **HA behaviour:** two jar pods, so one can fail. Running Keycloak pods are never affected. Only if **both** jar pods are down *and* a Keycloak pod restarts at that moment, that pod waits (`Init`) until a jar pod is back.
 * **Your own server instead:** put its URL in `KEYCLOAK_JAR_URL` (it must serve that same file and be reachable from inside a pod); the `jar` phase then does nothing.
 * **After B7** confirm: `kubectl -n tokenfactory get pods -l app.kubernetes.io/name=keycloak-spi` shows 2 pods Running (this in-cluster server has not yet been run on the real cluster — report it if not).
 
-**B5. Edit `config.env`** (`nano config.env`). **Lab** values (the real Etisalat values are in Part C — they differ only where marked):
+
+### B5. Fill in `config.env` (the ONLY file you edit)
 ```
-export KUBECONFIG_FILE="/home/azureuser/etisalat.kubeconfig"
-export STORAGE_CLASS="managed-csi"
-export SINGLE_NODE="yes"                      # lab only (1 node)
-export EXPOSE="loadbalancer"  ;  export LB_INTERNAL="yes"      # lab (Azure private LB). Real Etisalat: EXPOSE="clusterip"
-export BEHIND_CLOUDFLARE="no"                                  # lab has no Cloudflare. Real Etisalat: "yes"
-export DOMAIN="etisalat.lab"
-export TLS_CERT="/home/azureuser/wild.crt"   ;  export TLS_KEY="/home/azureuser/wild.key"      # only because BEHIND_CLOUDFLARE="no"
-export NODE_LOAD_MODE="pod"   ;  export NODES=""               # lab (AKS). Real Etisalat: ssh + the 4 worker IPs
-export SMTP_HOST="smtp.etisalat.lab"          # lab: any name, mails are simply not delivered. Real Etisalat: smtp.resend.com (Part C)
-export SMTP_USER="lab"
+nano config.env
 ```
-`TF_TAG` / `BRAND_TAG` are already filled (copied from the Mac). Nothing may still say `REPLACE_`:
+Set exactly these lines (everything else already has the right default; the other variables are explained in `VALUES-GUIDE.md`):
+```
+export KUBECONFIG_FILE="/home/<vm-user>/etisalat.kubeconfig"
+export NAMESPACE="tokenfactory"
+export SINGLE_NODE="no"
+export EXPOSE="clusterip"                      # Envoy + ingress are ClusterIP; the Cloudflare tunnel reaches them inside the cluster
+export BEHIND_CLOUDFLARE="yes"
+export INGRESS_TLS="yes"                       # must stay yes
+export INGRESS_TLS_SECRET="tf-etisalat-ingress-tls"
+export TLS_CERT="/home/<vm-user>/etisalat-tls/tls.crt"
+export TLS_KEY="/home/<vm-user>/etisalat-tls/tls.key"
+export DOMAIN="<the domain served through Cloudflare>"
+export STORAGE_CLASS="<storageclass from B2>"
+export NODE_LOAD_MODE="ssh"
+export NODES="<ssh-user>@172.22.100.24 <ssh-user>@172.22.100.25 <ssh-user>@172.22.100.26 <ssh-user>@172.22.100.27"
+export SMTP_HOST="smtp.resend.com" ; export SMTP_PORT="465" ; export SMTP_USER="resend" ; export SMTP_SSL="true" ; export SMTP_STARTTLS="false"
+export SMTP_PASSWORD="<the Resend API key>"
+export SUPPORT_EMAIL="support@iamsaif.ai"      # the sender verified at Resend
+```
+`TF_TAG`, `BRAND_TAG`, `CHART_REF` are already filled (Part A). Replicas, CPU/RAM, Keycloak, Postgres and Envoy sizing are the `SIZING & HA` lines of the same file: their defaults are the **live `xailon-tf-prod` values** (Part D) and normally need no change. Nothing may still say `REPLACE_`:
 ```
 grep -n REPLACE_ config.env | grep -v '^[0-9]*:#' || echo "config.env complete"
 ```
-**B6. Dry-run** — renders every chart offline, changes nothing on the cluster
+### B6. Dry-run — renders every chart offline and changes nothing on the cluster
 ```
 airgap/deploy-all.sh dry-run
 ```
-Must end with `dry-run PASSED`. If it stops with a FATAL line, fix what it says and re-run.
+It must end with `dry-run PASSED`. If it stops with a `FATAL:` line, fix what it says and run it again.
 
-**B6b. Choose how the images reach the nodes** (set it in `config.env` **before** B7 — the `images` phase of B7 uses it):
-| Where | Set in `config.env` | What happens |
-|---|---|---|
-| **Real Etisalat air-gap (use this)** | `export NODE_LOAD_MODE="ssh"`<br>`export NODES="user@node1 user@node2 user@node3"` | the VM copies the tars to each node with `scp` and runs `sudo ctr -n k8s.io images import` there. Needs **SSH from the install VM to every node + passwordless `sudo`**. **No container image is needed**, so it works with zero internet and zero registry |
-| Real Etisalat, **no SSH to the nodes** | `export NODE_LOAD_MODE="ssh"` is not possible → load by hand | copy `bundle/tars/` to each node (USB / scp from anywhere) and on **every node** run: `cd <folder-with-tars> && for f in *.tar; do sudo ctr -n k8s.io images import --all-platforms $f; done`. Then run B7 **without** the `images` phase: `airgap/deploy-all.sh check prepare render ns pg secrets controllers ingress openmeter app verify` (everything except `images`) |
-| AKS lab only | `export NODE_LOAD_MODE="pod"` (default) | a privileged helper pod does the import. It needs an image that is *already on the node* with `/bin/sh` + `chroot`; the lab got it from AKS's private MCR cache — a real air-gap would end in `ErrImagePull` |
-Check on a node afterwards (any mode): `sudo ctr -n k8s.io images ls -q | grep -c registry.etisalat.local` must print **38** (the `images` phase also prints `ALL 38 IMAGES PRESENT` by itself in `ssh`/`pod` mode).
+### B6b. Images reach the nodes (done by the `images` phase of B7; shown here so you know what happens)
+In `ssh` mode (set in B5) the VM copies the 38 tars to every worker with `scp` and runs `sudo ctr -n k8s.io images import` there. **No container image and no registry are needed.** After the `images` phase, on any worker:
+```
+sudo ctr -n k8s.io images ls -q | grep -c registry.etisalat.local          # must print 38 or more (digest-pinned images appear twice)
+```
+No SSH to the workers at all? Copy `bundle/tars/` to each worker by hand (USB/scp) and on **every** worker run `cd <folder-with-tars> && for f in *.tar; do sudo ctr -n k8s.io images import --all-platforms $f; done`; **then also tag the digest-pinned images** (the loader normally does this): on the VM `awk -F'|' '$3!=""{r=$2; sub(/:pinned-.*/,"",r); print "sudo ctr -n k8s.io images tag --force " $2 " " r "@sha256:" $3}' bundle/tars/INDEX > ~/tag-pins.sh`, copy `tag-pins.sh` to every worker and run `bash tag-pins.sh` there (prefer fixing SSH instead). Then run B7 without the `images` phase: `airgap/deploy-all.sh check prepare render ns jar pg secrets controllers ingress openmeter app verify`.
 
-**B7. Deploy everything (one command)**
+### B7. Deploy everything (one command)
 ```
 airgap/deploy-all.sh all 2>&1 | tee ~/etisalat-deploy.log
 ```
-Order it runs, with what each prints: `check` → `prepare` → `render` → `ns` → **`images`** (loads all 38 tars into the node; ends with `ALL 38 IMAGES PRESENT`) → **`jar`** (hosts the Keycloak plugin jar in the cluster) → `pg` (Postgres, waits for Running) → `secrets` → `controllers` (Envoy) → `ingress` → `openmeter` (slowest, up to 60 min) → `app` → `verify`.
-Total 40–90 min. If anything fails, fix the cause and continue where it stopped:
+Order, with what each prints: `check` → `prepare` → `render` → `ns` → **`images`** (loads all tars into every worker; ends with `ALL 38 IMAGES PRESENT`) → **`jar`** (hosts the Keycloak plugin jar in the cluster) → `pg` (Postgres HA, waits for Running) → `secrets` → `controllers` (Envoy Gateway + AI Gateway) → `ingress` → `openmeter` (slowest, up to 60 min) → `app` → `verify`. Total 40–90 min. If anything fails, fix the cause and continue where it stopped:
 ```
 airgap/deploy-all.sh --from <phase>        # e.g. --from openmeter
 ```
-Never delete `~/.etisalat-service-keys.env` (created by the `secrets` phase; every upgrade needs it).
+Never delete `~/.etisalat-service-keys.env` (created by the `secrets` phase; every upgrade needs the same values). Back it up now: `cp ~/.etisalat-service-keys.env <safe place>`.
 
-**B8. Open the portal.** `verify` printed the ingress IP (portal/admin/www/auth) and the Envoy IP (api); lab values were `10.40.16.7` and `10.40.16.8`. The lab has no DNS, so test with `--resolve` (nothing to edit on the machine):
+### B8. Cloudflare tunnel and DNS
+`verify` printed the in-cluster targets for the tunnel. Map the public hostnames as described in **Part M** (api. → Envoy Service :8080; portal./admin./www./auth. → `nginx-ingress-controller.nginx-ingress:80`). Admin login: user `admin@<DOMAIN>` (`PLATFORM_ADMIN_EMAIL`), password:
 ```
-export KUBECONFIG=~/etisalat.kubeconfig
-ING=$(kubectl -n nginx-ingress get svc nginx-ingress-controller -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-for h in www portal admin; do curl -sk -o /dev/null -w "$h %{http_code}\n" --resolve $h.etisalat.lab:443:$ING https://$h.etisalat.lab/; done      # 200 200 200
-curl -sk --resolve auth.etisalat.lab:443:$ING https://auth.etisalat.lab/auth/realms/master/.well-known/openid-configuration | grep -o '"issuer":"[^"]*"'
+kubectl --kubeconfig ~/etisalat.kubeconfig -n tokenfactory get secret tokenfactory-secrets -o jsonpath='{.data.platform-admin-password}' | base64 -d; echo
 ```
-Admin login: user = `admin@etisalat.lab`, password:
+### B9. Check it is healthy
 ```
-kubectl -n tokenfactory get secret tokenfactory-secrets -o jsonpath='{.data.platform-admin-password}' | base64 -d; echo
-```
-Real Etisalat: create DNS records instead (`api.<domain>` → Envoy IP, `portal. admin. www. auth.<domain>` → ingress IP).
-
-**B9. Check it is healthy**
-```
-export KUBECONFIG=~/etisalat.kubeconfig
+export KUBECONFIG=~/etisalat.kubeconfig; export PATH=~/etisalat/bundle/tools:$PATH
 kubectl get pods -A | grep -v -E 'Running|Completed'          # nothing important should be listed
-kubectl -n tokenfactory get postgresql pgdb          # Running
-kubectl -n tokenfactory get sts keycloak             # READY 3/3
+kubectl -n tokenfactory get postgresql pgdb                    # Running
+kubectl -n tokenfactory exec pgdb-0 -c postgres -- patronictl list      # 1 Leader + 2 Replicas
+kubectl -n tokenfactory get sts keycloak                       # READY 3/3
+kubectl -n tokenfactory get deploy                             # every tf-* READY 3/3 (docs/site 1/1), envoy 6/6
 kubectl -n tokenfactory get ingress tokenfactory
+kubectl -n tokenfactory get pods -l app.kubernetes.io/name=keycloak-spi      # 2 pods Running
+kubectl -n tokenfactory logs deploy/tf-ledger --tail=200 | grep -i leader      # one replica logs "this replica is the tf-ledger singleton leader"
+kubectl -n tokenfactory get secret tf-etisalat-ingress-tls
 ```
-
-**B10. Etisalat brand + feature gate** (the verification the developer's overlay asks for). The scripts are in the repo copy; they need `curl` and `python3`, and they read the release `tokenfactory` in namespace `tokenfactory`. The lab has no DNS, so first map the names on this VM (real Etisalat: DNS exists, skip these two lines):
+### B10. Etisalat brand + feature gate (the verification the developer's overlay asks for). The scripts are in the repo copy; they need `curl` and `python3`, and they read the release `tokenfactory` in namespace `tokenfactory`. The lab has no DNS, so first map the names on this VM (real Etisalat: DNS exists, skip these two lines):
 ```
 echo "<INGRESS_IP> portal.etisalat.lab admin.etisalat.lab www.etisalat.lab auth.etisalat.lab" | sudo tee -a /etc/hosts      # lab: 10.40.16.7
 echo "<ENVOY_IP>   api.etisalat.lab" | sudo tee -a /etc/hosts                                                             # lab: 10.40.16.8
@@ -181,58 +215,50 @@ KC=kubectl NS=tokenfactory PORTAL_URL=https://portal.<domain> SITE_URL=https://w
 ```
 Expected: `branding.sh` passes (brand `etisalat`, product `Token Factory by etisalat`, Etisalat Keycloak theme, light+dark). `features.sh` must show **`auth.socialLogin` and `billing.topup` OFF** (HTTP 404 `feature_disabled`) and **`auth.signup` ON** — that is the Etisalat feature ceiling from the brand package, not a bug. With the lab's self-signed certificate the scripts' `curl` needs `-k`; if a check fails only for that reason, note it and move on. In the lab the `docs` check fails by design (`DOCS_WEB=no`, no Etisalat docs image).
 
+
+### B-LAB. Only for the Azure lab (skip on the real cluster)
+The lab is a 1-node AKS cluster; the install VM is the jumphost `azureuser@10.40.1.4`. Differences in `config.env`:
+```
+export KUBECONFIG_FILE="/home/azureuser/etisalat.kubeconfig"       # az aks get-credentials -g rg-tokenfactory -n aks-etisalat-test --admin --file ~/etisalat.kubeconfig
+export STORAGE_CLASS="managed-csi"
+export SINGLE_NODE="yes"                                           # 1 Postgres instance, Keycloak anti-affinity forced to preferred
+export EXPOSE="loadbalancer" ; export LB_INTERNAL="yes"            # Azure private LB
+export BEHIND_CLOUDFLARE="no"                                      # lab has no Cloudflare: Envoy terminates TLS with the same certificate
+export DOMAIN="etisalat.lab"
+export NODE_LOAD_MODE="pod" ; export NODES=""                      # a privileged helper pod imports the tars (AKS only)
+export SMTP_HOST="smtp.etisalat.lab" ; export SMTP_USER="lab"      # mails are simply not delivered
+export SVC_TF_LEDGER="1 none"                                      # single node
+```
+Self-signed wildcard certificate for the lab: `openssl req -x509 -newkey rsa:2048 -nodes -days 30 -keyout ~/wild.key -out ~/wild.crt -subj "/CN=*.etisalat.lab" -addext "subjectAltName=DNS:*.etisalat.lab,DNS:etisalat.lab"`, then `TLS_CERT=/home/azureuser/wild.crt`, `TLS_KEY=/home/azureuser/wild.key`. The lab has no DNS: test with `curl -sk --resolve portal.etisalat.lab:443:<ingress-ip> https://portal.etisalat.lab/`.
+
 ---
-## PART C — Real Etisalat (instead of the lab)
-**The cluster** (7 VMs on 2 physical hosts) — images are loaded on the 4 workers; Postgres (3), Keycloak (3), Kafka (3) and Envoy (6) spread over them:
-| IP | Name | Role | Host |
-|---|---|---|---|
-| 172.22.100.11 | ed-kca-inf-tf-cn-01 | control (management host) | ED-KCA-INF-TF-CPU-01 |
-| 172.22.100.12 | ed-kca-inf-tf-cn-02 | control (management host) | ED-KCA-INF-TF-CPU-02 |
-| 172.22.100.23 | ed-kca-inf-tf-cn-03 | control node (VM) | ED-KCA-INF-TF-CPU-02 |
-| 172.22.100.24 | ed-kca-inf-tf-cpu-wrk-001 | CPU worker | ED-KCA-INF-TF-CPU-01 |
-| 172.22.100.25 | ed-kca-inf-tf-cpu-wrk-002 | CPU worker | ED-KCA-INF-TF-CPU-01 |
-| 172.22.100.26 | ed-kca-inf-tf-cpu-wrk-003 | CPU worker | ED-KCA-INF-TF-CPU-02 |
-| 172.22.100.27 | ed-kca-inf-tf-cpu-wrk-004 | CPU worker | ED-KCA-INF-TF-CPU-02 |
-Check which nodes accept pods with `kubectl get nodes` and `kubectl describe node <n> | grep Taints`; load images on every node that can run pods (normally only the 4 workers).
-
-**`config.env` for Etisalat** (these are the defaults of the file; fill the rest):
-```
-export NAMESPACE="tokenfactory"
-export SINGLE_NODE="no"
-export BEHIND_CLOUDFLARE="yes"                 # traffic arrives through the Cloudflare tunnel (as tokenfactory-prod / Xailon); Envoy (api.) stays plain HTTP
-export INGRESS_TLS="yes"                       # Ingress gets a tls: block from YOUR cert (Xailon style); "no" = plain HTTP Ingress (like prod)
-export INGRESS_TLS_SECRET="tf-etisalat-ingress-tls"
-export TLS_CERT="/path/etisalat.crt"  ;  export TLS_KEY="/path/etisalat.key"      # PEM; must cover portal./admin./www./auth.<DOMAIN>
-export EXPOSE="clusterip"                      # Envoy + ingress are ClusterIP; the Cloudflare tunnel reaches them inside the cluster
-export DOMAIN="<the domain served through Cloudflare>"
-export NODE_LOAD_MODE="ssh"
-export NODES="<ssh-user>@172.22.100.24 <ssh-user>@172.22.100.25 <ssh-user>@172.22.100.26 <ssh-user>@172.22.100.27"
-export STORAGE_CLASS="<storageclass with volume expansion>"
-export SMTP_HOST="smtp.resend.com" ; export SMTP_PORT="465" ; export SMTP_USER="resend" ; export SMTP_SSL="true" ; export SMTP_STARTTLS="false"
-export SMTP_PASSWORD="<the Resend API key>"    # same value tokenfactory-prod keeps in Vault as smtp-password
-export SUPPORT_EMAIL="support@iamsaif.ai"      # the Resend-verified sender (as prod)
-```
-* **SMTP = the same as `tokenfactory-prod` (Resend).** Resend is on the Internet: the Keycloak and tf-accounts pods need **outbound tcp/465 to `smtp.resend.com`** (and https to `api.resend.com`). Open it on the firewall for the worker network; without it sign-up/OTP/reset mails are not delivered (everything else works). If Etisalat prefers an internal relay: put its host/port in `SMTP_*` and set `SMTP_SSL`/`SMTP_STARTTLS` to what it speaks.
-* **Loading images:** `ssh` mode (copy + `ctr import`, no container image needed). The install VM needs SSH to the 4 workers and the user needs passwordless `sudo`. No SSH at all? Copy `bundle/tars/` to each worker by hand and on every node run `for f in *.tar; do sudo ctr -n k8s.io images import --all-platforms $f; done`, then run B7 without the `images` phase. `pod` mode is lab-only (needs an image already on the node).
-* **Ingress TLS from your certificate and key (as in the Xailon overlay):** `check` verifies the files exist, the certificate is not expired and the key belongs to it. The `ns` phase creates the Secret `tf-etisalat-ingress-tls` in namespace `tokenfactory` from `TLS_CERT`/`TLS_KEY` (`kubectl create secret tls …`), and the rendered Ingress gets `tls: [{ secretName: tf-etisalat-ingress-tls, hosts: [portal., admin., www., auth.<DOMAIN>] }]`. Ports 80 **and** 443 answer; with `BEHIND_CLOUDFLARE="yes"` the annotation `ingress.kubernetes.io/ssl-redirect: "false"` is set (as Xailon), so the tunnel may talk to nginx over plain HTTP :80 or over HTTPS :443. Without that tls block the F5 controller would answer with its own self-signed default certificate. Verify after B7: `kubectl -n tokenfactory get secret tf-etisalat-ingress-tls` and `kubectl -n tokenfactory get ingress tokenfactory -o jsonpath='{.spec.tls}'`.
-* **Envoy (`api.`) and `BEHIND_CLOUDFLARE`:** `"yes"` = Envoy listens on plain HTTP :8080 (Cloudflare terminates TLS for api.), makes Envoy and warden trust `Cf-Connecting-Ip`; with `EXPOSE="clusterip"` there is no LoadBalancer at all. If you ever have **no** Cloudflare: `BEHIND_CLOUDFLARE="no"` (Envoy then also terminates TLS with the same cert, Secret `tf-etisalat-tls`) and `EXPOSE="loadbalancer"` (needs MetalLB/F5). `INGRESS_TLS="no"` gives a plain-HTTP Ingress like tokenfactory-prod's live one (no certificate needed).
-* **Keycloak jar:** nothing to host (Part B4). **MinIO tar:** Etisalat has no ACR, so build it with `docker save` on a host that has the image (A7).
-* The Etisalat-branded `tf-docs-web` build is still missing (`DOCS_WEB="no"`); ask the developer. Keycloak's internal HTTP/HTTPS: `keycloak.config.httpEnabled` stays `true`; flip it only after all callers are green on HTTPS.
-* Need: ≥ 3 schedulable nodes (you have 4 workers), a StorageClass with volume expansion, outbound 465 to Resend (above), the Cloudflare tunnel (Part M).
-
 ## PART D — Sizing and HA: all in `config.env` (section "SIZING & HA")
-Layout is the same as `tokenfactory-prod`: **`tokenfactory`** = everything of TokenFactory incl. the Postgres cluster `pgdb`; **`postgres`** = Zalando operator only; **`openmeter`** = OpenMeter.
-| What | `config.env` variable (default) |
-|---|---|
-| **Envoy** pods (all inference load; **no CPU/RAM requests or limits**, like prod; **minimum 6**) | `ENVOY_REPLICAS` (**6**), `ENVOY_PDB_MIN_AVAILABLE` (1) |
-| **Keycloak HA** | `KEYCLOAK_REPLICAS` (**3**), `KEYCLOAK_MEM_REQUEST/LIMIT` (1Gi/8Gi), `KEYCLOAK_HEAP` (`-Xmx2g`) |
-| **Postgres HA** (Zalando `pgdb`, external for the app) | `PG_INSTANCES` (**3**), `PG_VOLUME_SIZE` (20Gi), `PG_CPU_REQUEST/LIMIT` (1/4), `PG_MEM_REQUEST/LIMIT` (2Gi/8Gi), `PG_MAX_CONNECTIONS` (300) |
-| tf-* replicas | `TF_REPLICAS` (3; `tf-ledger` always 1), `SITE_DOCS_REPLICAS` (1) |
-| ClickHouse disk | `CH_DATA_SIZE`, `CH_LOG_SIZE` |
-| Ingress on/off | `INGRESS_ENABLED` (true) |
-| **anything else** (one service's CPU/RAM, annotations, SMTP SSL, …) | `CUSTOM_VALUES_YAML` (raw YAML, last section of `config.env`) |
-The CPU/RAM of every tf-* pod is already the **tokenfactory-prod live value** (checked on the running prod cluster). To change one, use `CUSTOM_VALUES_YAML`, e.g. `tf-relay: { replicas: 4, resources: { requests: { cpu: 100m, memory: 512Mi } } }` — see `VALUES-GUIDE.md` §3. OpenMeter, NGINX-ingress and the Envoy controllers keep their own small files (`values/openmeter…`, `values/nginx-ingress…`, `values/envoy-gateway…`, `values/ai-gateway…`).
-After editing `config.env`: `airgap/deploy-all.sh dry-run`, then `airgap/deploy-all.sh render ns app` (Postgres: `airgap/deploy-all.sh pg`).
+Layout is the same as `xailon-tf-prod`: **`tokenfactory`** = everything of TokenFactory incl. the Postgres cluster `pgdb`; **`postgres`** = Zalando operator only; **`openmeter`** = OpenMeter.
+**Every default below is the live value of `xailon-tf-prod`** (read from that cluster on 10 Nov 2026: replicas, CPU/RAM, Keycloak, Envoy, Ingress), so Etisalat starts identical to Xailon. Postgres: Xailon uses Azure Postgres 16 (managed), Etisalat runs Zalando Patroni with the same major version 16.
+| What | `config.env` variable | Default (= Xailon) |
+|---|---|---|
+| **Envoy** pods (all inference load) | `ENVOY_REPLICAS`, `ENVOY_PDB_MIN_AVAILABLE` | **6**, 1 PDB; **no CPU/RAM requests or limits** on the Envoy container (set in the template; change via `CUSTOM_VALUES_YAML`) |
+| **Keycloak HA** | `KEYCLOAK_REPLICAS`, `KEYCLOAK_MEM_REQUEST/LIMIT`, `KEYCLOAK_HEAP`, `KEYCLOAK_ANTIAFFINITY` | **3**, 1Gi/2Gi (memory only), `-Xms512m -Xmx2g`, `required` (one pod per node; forced `preferred` when `SINGLE_NODE=yes`). Infinispan cache, PDB `maxUnavailable: 1` |
+| **Postgres HA** (Zalando `pgdb`, external for the app) | `PG_VERSION`, `PG_INSTANCES`, `PG_VOLUME_SIZE`, `PG_CPU_REQUEST/LIMIT`, `PG_MEM_REQUEST/LIMIT`, `PG_MAX_CONNECTIONS` | 16, 3, 20Gi, 1/4, 2Gi/8Gi, 300 |
+| **tf-\* services** (replicas + CPU/RAM, one line each) | `SVC_TF_ACCOUNTS`, `SVC_TF_ADMIN_WEB`, `SVC_TF_AUTH`, `SVC_TF_BABEL`, `SVC_TF_CONTROL`, `SVC_TF_DOCS_WEB`, `SVC_TF_LEDGER`, `SVC_TF_OPS`, `SVC_TF_PORTAL_WEB`, `SVC_TF_RELAY`, `SVC_TF_SHIM`, `SVC_TF_SITE_WEB`, `SVC_TF_WARDEN` | see the table below |
+| OpenFGA / MinIO / Redis resources | `RES_OPENFGA`, `RES_MINIO`, `RES_REDIS` | `- 64Mi - 256Mi`, `50m 128Mi 300m 512Mi`, `100m 1Gi 1 4Gi` |
+| ClickHouse disk | `CH_DATA_SIZE`, `CH_LOG_SIZE` | 50Gi, 5Gi |
+| Ingress on/off, TLS secret | `INGRESS_ENABLED`, `INGRESS_TLS_SECRET` | true, `tf-etisalat-ingress-tls` |
+| **anything else** (annotations, extra hosts, SMTP details, …) | `CUSTOM_VALUES_YAML` (raw YAML, last section of `config.env`) | empty |
+
+Format of an `SVC_*` line: `"<replicas> <cpu-request> <mem-request> <cpu-limit> <mem-limit>"`; a `-` leaves that value out; `"<replicas> none"` means no requests and no limits at all. Defaults:
+| Service | `SVC_*` default | Meaning (same as `xailon-tf-prod`) |
+|---|---|---|
+| tf-accounts | `3 50m 64Mi 200m 256Mi` | 3 pods, 50m/64Mi requests, 200m/256Mi limits |
+| tf-admin-web, tf-auth, tf-control, tf-ledger, tf-relay, tf-warden | `3 none` | 3 pods, no requests/limits |
+| tf-babel | `3 25m 32Mi 300m 256Mi` | |
+| tf-ops | `3 20m 48Mi 250m 128Mi` | |
+| tf-portal-web | `3 50m 32Mi 200m 1Gi` | |
+| tf-shim | `3 25m 256Mi 1 1Gi` | |
+| tf-docs-web | `1 50m 96Mi 300m 256Mi` | only deployed when `DOCS_WEB="yes"` |
+| tf-site-web | `1 50m 64Mi 300m 256Mi` | |
+tf-ledger runs 3 pods with leader election (one pod runs the singleton loops, chosen by a Postgres advisory lock), a PDB (`minAvailable: 1`) and a RollingUpdate strategy, as on Xailon. Ingress: class `nginx` (F5), annotations `client-max-body-size 128m`, `proxy-buffer-size 16k`, `proxy-buffers 8 16k`, connect/read/send timeouts `75s/600s/600s`, `ssl-redirect "false"` (Cloudflare), TLS from your certificate: the same as Xailon.
+**How to change a value later:** edit the line in `config.env`, then `airgap/deploy-all.sh dry-run` and `airgap/deploy-all.sh render ns app` (Postgres lines: `airgap/deploy-all.sh pg`). Example, 4 relay pods with more memory: `export SVC_TF_RELAY="4 100m 512Mi 2 2Gi"`. Check what Helm will use: `grep -A6 '^tf-relay:' rendered/services.yaml`.
 
 ## PART E — If something goes wrong
 | You see | Do |
@@ -240,11 +266,13 @@ After editing `config.env`: `airgap/deploy-all.sh dry-run`, then `airgap/deploy-
 | `01-bundle-connected.sh` prints nothing and exits | old `env.sh` (a failing `[ -d tools ] && …` under `set -e`). Use the current scripts; test with `bash -x airgap/01-bundle-connected.sh \| head -30` |
 | `01`: `unauthorized` from ghcr.io | `skopeo login ghcr.io -u <user>` with a PAT that has `read:packages` for Infinia-Technology. The token saved by Docker on the Mac was invalid |
 | `01`: `Docker references with both a tag and digest are not supported` | old script. Current one strips the tag for `@sha256` images |
-| `01`: `FAILED images … minio` | expected: MinIO's public images are gone. Do step A7 |
+| `01`: `FAILED images … minio` | the MinIO image is `ghcr.io/infinia-technology/ai-gateway-platform/minio@sha256:…`: same GHCR login/PAT as the tf-* images (A2) |
 | `01`: `helm: cannot execute binary file` on the Mac | `bundle/tools/helm` is a Linux binary; current `env.sh` only puts it on PATH on Linux |
 | `FATAL: missing tool: make` / `envsubst` / `skopeo` | old script versions. The current scripts need only `perl python3 openssl tar`; `kubectl` + `helm` come from `bundle/tools` |
 | `FATAL: config.env still has REPLACE_` | fill that line |
 | `check`: `no Keycloak jar in …/jars` | `bundle/jars/` is empty: download the jar (URL in B4) into it, or rebuild the bundle (A5) |
+| `check`: `repo not found` / `prepare`: `ingress.yaml is missing` | the chart checkout is missing or not the pinned release: run `airgap/00-fetch-chart.sh` on the Mac and copy the folder again (A3, A6) |
+| `check`: `INGRESS_TLS must be yes` | this package deploys the Ingress with TLS only; set `INGRESS_TLS="yes"` and give `TLS_CERT`/`TLS_KEY` |
 | `images` phase: `MISSING <image>` | the tar was not in the bundle → rebuild on the Mac (A5) and rsync again |
 | pod `ErrImagePull` / `ImagePullBackOff` | the image is not on that node. Run `airgap/deploy-all.sh images`. For `@sha256` images (keycloak, busybox, openmeter) also check `kubectl describe pod` shows the exact reference |
 | Keycloak not Ready / init `fetch-providers` fails | the jar server is not up: `kubectl -n tokenfactory get pods -l app.kubernetes.io/name=keycloak-spi` (2 pods Running) and `kubectl -n tokenfactory logs keycloak-0 -c fetch-providers`; fix and `airgap/deploy-all.sh jar`, then delete the Keycloak pod. With your own `KEYCLOAK_JAR_URL`: that URL must answer from inside a pod |
@@ -279,22 +307,22 @@ Delete the cluster: `terraform destroy` with the `-target` list written at the t
 | 1 | The original doc assumed a registry; Etisalat has none | images are OCI tars imported with `ctr` into every node (`load-images.sh`); image names carry the fixed prefix `registry.etisalat.local` but nothing is ever pulled |
 | 2 | Digest-pinned images (`@sha256`: keycloak, busybox 1.36, openmeter) | copied with `--all --preserve-digests`; loader also tags `name@sha256:…`. Confirmed working in the lab (tf-auth init uses the busybox digest) |
 | 3 | 4 image references are hardcoded in chart templates | `03-patch-hardcoded-images.sh` rewrites tf-auth busybox, OpenMeter busybox + clickhouse, and the ClickHouse PVC (upstream hardcodes 3Gi/1Gi and no StorageClass) |
-| 4 | No Ingress template on `develop` | PR #678 template is required in the chart checkout; `prepare` stops with an error if it is missing |
-| 5 | Keycloak downloads its SPI jar from Maven Central on every start | the same jar as tokenfactory-prod / Xailon PR #678 (valid for Keycloak 26.7.x, bundle has 26.7.5) is bundled (`bundle/jars/`) and hosted inside the cluster by phase `jar` (ConfigMap + busybox httpd + Service `keycloak-spi`); `KEYCLOAK_JAR_URL` stays empty, or points to your own server |
+| 4 | The Ingress template (Xailon PR #678) was missing on `develop` | merged since: chart 0.17.7 contains `templates/ingress.yaml`. It refuses an Ingress without `ingress.tls[]` (TOKE75R-1389), which is why this package is TLS-only; the old patch step was removed |
+| 5 | Keycloak downloads its SPI jar from Maven Central on every start | the jar matching the chart's Keycloak (26.8.2 -> `26.6.1-KC26.8.0`) is bundled (`bundle/jars/`) and hosted inside the cluster by phase `jar` (ConfigMap + busybox httpd + Service `keycloak-spi`); `KEYCLOAK_JAR_URL` stays empty, or points to your own server |
 | 6 | GeoIP sidecar downloads from GitHub, NGINX controller phones home | GeoIP off (`tf-ledger.geoip.enabled: false`), controller telemetry off |
-| 7 | MinIO's official image no longer exists on Docker Hub/quay | step A7 builds the tar from the prod ACR |
+| 7 | MinIO's official image no longer exists on Docker Hub/quay | chart 0.17.x uses Infinia's own MinIO image on GHCR (digest-pinned); bundled like the tf-* images, no workaround needed |
 | 8 | No Etisalat-branded `tf-docs-web` image | default-brand image stored under the branded tag (needed by `tf-accounts` init `legal-src`); `DOCS_WEB=no`. **Ask the developer for an Etisalat docs build** |
 | 9 | `preflight.sh`'s OpenMeter probe cannot pass on a NetworkPolicy-enforcing cluster | `deploy-all.sh app` runs its own checks and calls `install.sh` with `SKIP_PREFLIGHT=1` |
 | 10 | `install.sh` prints the helm command (with `--set` secrets) into the log | service keys go in a 0600 values file (`rendered/service-keys.yaml`) |
 | 11 | `make`, `envsubst`, `skopeo` are not on a fresh VM | not needed any more (perl-based `envsub`, `install.sh` called directly; `kubectl`/`helm` in `bundle/tools`) |
 | 12 | A 1-node cluster cannot hold 3 Postgres instances (anti-affinity) | `SINGLE_NODE=yes` → 1 instance, node-count check skipped (lab only) |
 | 13 | On AKS the LoadBalancer Services would get public IPs | `LB_INTERNAL=yes` adds the Azure internal-LB annotation to Envoy and NGINX |
-| 14 | `tf-ledger` cannot run >1 replica (no leader election, 5 unguarded loops) | pinned to 1; ticket drafted for the developer |
+| 14 | `tf-ledger` could not run >1 replica (no leader election, 5 unguarded loops) | fixed upstream in 0.17.4 (Postgres advisory-lock leader election). Fresh installs run `TF_LEDGER_REPLICAS=3` with PDB + RollingUpdate, as tf-stage and Xailon do |
 | 15 | Postgres `pg_hba` allows `0.0.0.0/0 md5` (copied from prod) | tighten to the pod CIDR for production |
 | 16 | No Postgres backup inside an air-gap | not configured — plan `pg_dump`/WAL-G to an internal object store before production |
 
 ## PART I — The developer's `values-tf-etisalat.yaml`: where each `TODO(owner)` is filled in this package
-`ai-gateway-platform/helm/tokenfactory/values-tf-etisalat.yaml` (identical to `develop`, checked 5 Nov) stays untouched. It is layer 1; our files are layer 2. Order Helm applies: chart `values.yaml` → `values-tf-etisalat.yaml` → `rendered/umbrella.yaml` → `rendered/lb-umbrella.yaml` → `rendered/service-keys.yaml`.
+`ai-gateway-platform/helm/tokenfactory/values-tf-etisalat.yaml` (branch `stage`, pinned commit `CHART_REF`, chart 0.17.7) stays untouched. It is layer 1; our files are layer 2. Order Helm applies: chart `values.yaml` → `values-tf-etisalat.yaml` → `rendered/umbrella.yaml` → `rendered/lb-umbrella.yaml` → `rendered/service-keys.yaml`.
 
 | `TODO(owner)` in the developer's file | Filled here by |
 |---|---|
@@ -303,7 +331,7 @@ Delete the cluster: `terraform destroy` with the `-target` list written at the t
 | `global.urls.*` (`etisalat.example.com`) | `config.env` → `DOMAIN` (creates `api. auth. portal. admin. www.`) |
 | `supportEmail`, `platformAdminEmail`, SMTP host/port/user | `config.env` → `SUPPORT_EMAIL`, `PLATFORM_ADMIN_EMAIL`, `SMTP_HOST/PORT/USER/PASSWORD` |
 | `stripePublishableKey` (empty) | leave empty — `billing.topup` is off in this brand |
-| Persona CDD | not in the chart on `develop` yet — nothing to set |
+| Persona CDD (KYC) | off: `global.cdd` stays disabled in this deployment (it would need Persona templates, API key, webhook and outbound `api.withpersona.com`) |
 | datastores ("inherited: external") | set **explicitly** in `umbrella.values.yaml.tmpl` (`global.postgres`, `keycloak.postgres`, `openfga.postgres` → Zalando `pgdb`) |
 | replicas / PDB / sizing | `umbrella.values.yaml.tmpl` (3 replicas, Keycloak HA, Envoy PDB) |
 | `OPENMETER_URL` namespace | default `openmeter` is kept (our OpenMeter release uses it) |
@@ -313,8 +341,8 @@ Delete the cluster: `terraform destroy` with the `-target` list written at the t
 
 **What comes unchanged from the developer's Etisalat overlay (we do not touch it):** the whole `brandPack` (Etisalat theme, copy, colours, feature ceiling: sign-up on, social login and top-up off), `keycloakSecrets.generate: true`, `secrets.existingSecret: tokenfactory-secrets`, Keycloak in-cluster TLS (`keycloak-tls`, `keycloak-ca`, HTTPS upstreams of the portal/admin pods), the complete `tf-ledger.env` list (OpenMeter URL, freshness, replay horizon), `tf-warden`/`tf-relay`/`tf-shim` sizing, Redis 10Gi/3gb, and the `tf-gateway-resources` TLS + Envoy LoadBalancer port patch.
 **What this package adds on top (layer 2):** the **Ingress** (portal/admin/www/auth), **Keycloak HA** (3 replicas, Infinispan, PDB, anti-affinity), **Postgres** (Zalando `pgdb`, explicit external blocks for the app, Keycloak and OpenFGA), registry prefix / image tags, URLs from `DOMAIN`, SMTP, replicas and resources of every service, Envoy replicas + PDB, GeoIP off, and the lab flags.
-The Ingress is the Xailon chart change (PR #678, `ingress.yaml` + `ingress:` values) that is **not merged into `develop` yet**; the developer's file therefore says "no Ingress objects". `patches/0001-…` carries it (the chart copy used here already contains it). Once #678 is merged just delete the patch step; the `ingress:` block in our values stays exactly as it is.
-`develop` is already 18 commits ahead (0.17.3 preparation, new validators such as `validate-sso-proof`, `validate-control-plaintext`). This package is pinned to 0.17.2 on purpose (it is what was tested). To move to 0.17.3: update the chart checkout, `TF_TAG`/`BRAND_TAG`, rebuild the bundle, run `dry-run`, and expect to fix whatever the new validators ask for.
+The Ingress template (Xailon PR #678) is part of the chart since 0.17.x; the developer's Etisalat file still says "no Ingress objects", so this package adds the `ingress:` block in layer 2 (always with TLS, see Part J).
+This package is pinned to chart **0.17.7** (`CHART_REF` in `config.env`, branch `stage`). To move to a newer release: change `TF_TAG`, `BRAND_TAG` and `CHART_REF` together, run `airgap/00-fetch-chart.sh`, rebuild the bundle (A5), run `dry-run` and fix whatever new validators ask for. Check that every image the new chart renders is in `airgap/images.txt` (render all releases with `helm template` and compare); a missing digest-pinned image would otherwise surface only as `ErrImagePull` in the air-gap.
 
 ## PART J — Changing a value later (any value, including the Ingress)
 **Quick finder:** `VALUES-GUIDE.md` lists every `config.env` variable, how to change *any* other value with `CUSTOM_VALUES_YAML`, and what each key of the developer's overlay maps to.
@@ -360,7 +388,7 @@ After any Ingress edit: `kubectl -n tokenfactory get ingress tokenfactory -o yam
 | SMTP password / Stripe or Google keys later | they live in Secret `tokenfactory-secrets`: `kubectl -n tokenfactory patch secret tokenfactory-secrets -p '{"stringData":{"smtp-password":"NEW"}}'` then `kubectl -n tokenfactory rollout restart deploy/tf-auth deploy/tf-accounts` and `rollout restart sts/keycloak` (the chart cannot detect a change inside an existing Secret) |
 | Replicas / CPU / RAM of a service | template: `tf-relay: { replicas: 3, resources: … }` etc. (Part D lists every block) |
 | Keycloak replicas, RAM, heap | template `keycloak:` — keep `-Xmx` at ½–¾ of `limits.memory` |
-| New image version | rebuild bundle with new `TF_TAG` (Part A), copy, then `airgap/deploy-all.sh images render app` |
+| New image version | rebuild bundle with new `TF_TAG` (Part A: change `TF_TAG`, `BRAND_TAG`, `CHART_REF`), copy, then `airgap/deploy-all.sh images render app` |
 | Envoy replicas / limits | template `tf-gateway-resources.envoyProxy…envoyDeployment` |
 | Postgres size / instances / parameters | `zalando/charts/pgdb/values.yaml`, then `deploy-all.sh pg` (disk can only grow) |
 | A value that has no key in the template yet | add the key exactly as it appears in the chart's `values.yaml` (see `ai-gateway-platform/helm/tokenfactory/values-tf-prod.yaml` for every available key and its comment); lists such as `tf-ledger.env` are **replaced wholesale** — copy the whole list from `values-tf-etisalat.yaml` and change the one entry |
@@ -380,7 +408,7 @@ The overlay sets `global.secrets.existingSecret: tokenfactory-secrets` (the char
 | `smtp-password` | optional | yes, from `SMTP_PASSWORD` in `config.env` |
 | `kc-admin-sa-client-secret`, `kc-accounts-sa-client-secret`, `keycloak-tls`, `keycloak-ca` | generated **in the cluster** by the `kc-secrets` hook (`global.keycloakSecrets.generate: true`) | do not create by hand |
 | `google-/microsoft-/github-client-secret`, `sso-verification-google-client-secret`, `openfga-api-token` | only if social login / SSO verification / OpenFGA token is turned on (all off here) | no |
-| `persona-*`, `cdd-email-hmac-key` | only for the Persona CDD block (not in the chart on `develop` yet) | no |
+| `persona-*`, `cdd-email-hmac-key` | only if Persona CDD (KYC) is turned on (off here) | no |
 | the five `serviceKeyTf*` | not in the Secret: pod env literals | yes, in `~/.etisalat-service-keys.env`, passed through `rendered/service-keys.yaml` |
 Other objects the overlay expects to exist before the app: the pull secret (here `registry-pull`, instead of the overlay's `ghcr-secret`; the script creates it in every namespace), the gateway TLS secret `tf-etisalat-tls`, and the Zalando role Secrets `<role>.pgdb.credentials.postgresql.acid.zalan.do` (created by the operator). All of them are created by `deploy-all.sh` before the app is installed. To use your own secret manager instead (Vault, External Secrets): create `tokenfactory-secrets` with the keys above **before** running `deploy-all.sh all` — the `secrets` phase keeps an existing Secret (but still needs `~/.etisalat-service-keys.env`; create it with the five `SERVICE_KEY_TF_ACCOUNTS/LEDGER/CONTROL/RELAY/WARDEN` lines).
 
@@ -428,24 +456,24 @@ export DEST_TLS_VERIFY="true"                            # "false" only for a se
 **L4. Tag + push** — nothing to tag by hand: `skopeo` copies each tar straight to its final name (the "tag" step):
 | Image (from `airgap/images.txt`) | Lands in the registry as |
 |---|---|
-| `ghcr.io/infinia-technology/ai-gateway-platform/tf-accounts:0.17.2-356be61` | `$REGISTRY/infinia-technology/ai-gateway-platform/tf-accounts:0.17.2-356be61` |
-| `docker.io/library/redis:7-alpine` | `$REGISTRY/redis:7-alpine` |
-| `quay.io/keycloak/keycloak@sha256:37dbaf…` (digest-pinned) | `$REGISTRY/keycloak/keycloak:pinned-37dbaf…` (digest preserved, so the chart's `@sha256` reference resolves) |
+| `ghcr.io/infinia-technology/ai-gateway-platform/tf-accounts:0.17.7-160792b` | `$REGISTRY/infinia-technology/ai-gateway-platform/tf-accounts:0.17.7-160792b` |
+| `docker.io/library/redis@sha256:c5d34a…` (digest-pinned) | `$REGISTRY/redis:pinned-c5d34a…` |
+| `quay.io/keycloak/keycloak@sha256:3879c6…` (digest-pinned) | `$REGISTRY/keycloak/keycloak:pinned-3879c6…` (digest preserved, so the chart's `@sha256` reference resolves) |
 | `ghcr.io/zalando/spilo-17:4.0-p2` | `$REGISTRY/zalando/spilo-17:4.0-p2` |
 Run it as part of the normal flow or alone:
 ```
 cd ~/etisalat
 airgap/deploy-all.sh images          # IMAGE_MODE=registry -> airgap/02-push-registry.sh (38 images)
 ```
-It ends with `registry push complete` after proving that the three `@sha256` images (Keycloak, busybox 1.36, OpenMeter) resolve **by digest**. Plain `docker pull/tag/push` would change those digests and the pods would never start — always push with this script.
+It ends with `registry push complete` after proving that the `@sha256` images (Keycloak, OpenFGA, Postgres, Redis, MinIO, curl, busybox 1.36, OpenMeter) resolve **by digest**. Plain `docker pull/tag/push` would change those digests and the pods would never start — always push with this script.
 Harbor: the project must exist first (`unauthorized`/`project not found` otherwise), and the three digest-pinned images need the project to allow tags that look like `pinned-<digest>` (no tag-immutability rule that blocks them).
 
 **L5. Verify the registry before deploying**
 ```
 curl -u "$REGISTRY_USER:$REGISTRY_PASS" https://harbor.etisalat.com/v2/_catalog               # lists repositories (Harbor: use its UI/API per project)
-skopeo inspect --creds "$REGISTRY_USER:$REGISTRY_PASS" docker://$REGISTRY/infinia-technology/ai-gateway-platform/tf-auth:0.17.2-356be61 | head -5
+skopeo inspect --creds "$REGISTRY_USER:$REGISTRY_PASS" docker://$REGISTRY/infinia-technology/ai-gateway-platform/tf-auth:0.17.7-160792b | head -5
 # from a node: it can really pull
-sudo crictl pull --creds "$REGISTRY_USER:$REGISTRY_PASS" $REGISTRY/redis:7-alpine
+sudo crictl pull --creds "$REGISTRY_USER:$REGISTRY_PASS" $REGISTRY/alpine:3.22
 ```
 **L6. Deploy** — the same one command; the `images` phase now pushes instead of loading tars:
 ```
@@ -478,8 +506,9 @@ Checks after the tunnel is up: `curl -s -o /dev/null -w '%{http_code}\n' https:/
 **`api.<DOMAIN>`** goes straight to Envoy over HTTP :8080 (like Xailon, where `api.` bypasses nginx).
 The real client IP comes from Cloudflare's `Cf-Connecting-Ip` header, which is only trustworthy while Cloudflare is the **only** way into Envoy — do not expose the Envoy or ingress Services any other way (no NodePort/LoadBalancer) while `BEHIND_CLOUDFLARE="yes"`.
 
-## What was verified in the lab (5 Nov 2026)
+## What was verified in the lab (5 Nov 2026, chart 0.17.2)
 Run on `aks-etisalat-test` (1 node, no internet) exactly as above: all 38 images loaded from tars (`ALL 38 IMAGES PRESENT`), Postgres Patroni leader Running, Keycloak 3/3 with one Infinispan cluster of 3 members, 3× Envoy, all tf-* services Ready, OpenMeter (Kafka 3, API 2, ClickHouse, Redis) Running; `www`, `portal`, `admin` → HTTP 200 through the NGINX ingress, Keycloak issuer `https://auth.etisalat.lab/auth/realms/master`, `api` via Envoy → 401 without a key (correct). Digest-pinned images (`@sha256`) start from the node tars.
-Known gaps: (1) no Etisalat-branded `tf-docs-web` image exists, so the default-brand image is stored under the branded tag (legal pages show default-brand text; docs site stays off, `DOCS_WEB=no`) — ask the developer to run the Etisalat docs build; (2) Postgres runs 1 instance in the lab (`SINGLE_NODE=yes`), HA needs ≥ 3 nodes; (3) MinIO has no public source any more (A7).
+**Chart 0.17.7 (10 Nov 2026):** verified OFFLINE only: `airgap/deploy-all.sh dry-run` passes (all releases render with `helm template`, TLS Ingress), every image the rendered releases reference is in `airgap/images.txt` and was checked to exist at its source. It has NOT yet been installed on a cluster; treat the first run as a test and report the first failing step.
+Known gaps: (1) no Etisalat-branded `tf-docs-web` image exists, so the default-brand image is stored under the branded tag (legal pages show default-brand text; docs site stays off, `DOCS_WEB=no`) — ask the developer to run the Etisalat docs build; (2) Postgres runs 1 instance in the lab (`SINGLE_NODE=yes`), HA needs ≥ 3 nodes.
 
 > Status of this document: image loading from a tar into the lab node was proven with a test image; the steps above were run end to end in the lab. Report the first failing step with its output.

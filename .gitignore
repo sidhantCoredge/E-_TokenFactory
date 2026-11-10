@@ -1,1 +1,9 @@
+# secrets / site-specific
 Real-values-of-tf-prod.yaml
+*.local.yaml
+# generated or fetched on the Mac (never committed): the image/chart bundle, the private chart checkout, rendered values
+bundle/
+ai-gateway-platform/
+rendered/
+*.tar
+.DS_Store
