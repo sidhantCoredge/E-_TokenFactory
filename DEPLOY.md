@@ -252,19 +252,7 @@ Expected: `branding.sh` passes (brand `etisalat`, product `Token Factory by etis
 
 
 ### B-LAB. Only for the Azure lab (skip on the real cluster)
-The lab is a 1-node AKS cluster; the install VM is the jumphost `azureuser@10.40.1.4`. Differences in `config.env`:
-```
-export KUBECONFIG_FILE="/home/azureuser/etisalat.kubeconfig"       # az aks get-credentials -g rg-tokenfactory -n aks-etisalat-test --admin --file ~/etisalat.kubeconfig
-export STORAGE_CLASS="managed-csi"
-export SINGLE_NODE="yes"                                           # 1 Postgres instance, Keycloak anti-affinity forced to preferred
-export EXPOSE="loadbalancer" ; export LB_INTERNAL="yes"            # Azure private LB
-export BEHIND_CLOUDFLARE="no"                                      # lab has no Cloudflare: Envoy terminates TLS with the same certificate
-export DOMAIN="etisalat.lab"
-export NODE_LOAD_MODE="pod" ; export NODES=""                      # a privileged helper pod imports the tars (AKS only)
-export SMTP_HOST="smtp.etisalat.lab" ; export SMTP_USER="lab"      # mails are simply not delivered
-export SVC_TF_LEDGER="1 none"                                      # single node
-```
-Self-signed wildcard certificate for the lab: `openssl req -x509 -newkey rsa:2048 -nodes -days 30 -keyout ~/wild.key -out ~/wild.crt -subj "/CN=*.etisalat.lab" -addext "subjectAltName=DNS:*.etisalat.lab,DNS:etisalat.lab"`, then `TLS_CERT=/home/azureuser/wild.crt`, `TLS_KEY=/home/azureuser/wild.key`. The lab has no DNS: test with `curl -sk --resolve portal.etisalat.lab:443:<ingress-ip> https://portal.etisalat.lab/`.
+The lab (1 node, no internet, no X10000, no MetalLB) has its own step-by-step guide with exact commands: **`DEPLOY-LAB.md`**. Do not use the settings of this Part B there.
 
 ---
 ## PART D — Sizing and HA: all in `config.env` (section "SIZING & HA")

@@ -26,7 +26,7 @@ export KEYCLOAK_JAR_URL
 : "${ENVOY_REPLICAS:=6}" "${ENVOY_PDB_MIN_AVAILABLE:=1}" "${KEYCLOAK_REPLICAS:=3}" "${KEYCLOAK_MEM_REQUEST:=1Gi}" "${KEYCLOAK_MEM_LIMIT:=2Gi}"
 : "${KEYCLOAK_HEAP:=-Xms512m -Xmx2g -XX:+UseContainerSupport}" "${INGRESS_ENABLED:=true}"
 : "${SMTP_SSL:=true}" "${SMTP_STARTTLS:=false}" "${EXPOSE:=loadbalancer}" "${BEHIND_CLOUDFLARE:=no}" "${INGRESS_TLS:=yes}" "${INGRESS_TLS_SECRET:=tf-etisalat-tls}"   # older config.env keeps the old behaviour
-: "${VAULT_UI:=false}" "${VAULT_HOST:=vault.${DOMAIN:-}}" "${VAULT_UI_ALLOW:=172.22.100.0/22}" "${SECRETS_BACKEND:=kubernetes}" "${VAULT_NAMESPACE:=vault}" "${VAULT_STORAGE_SIZE:=10Gi}" "${VAULT_INIT_FILE:=$HOME/.etisalat-vault-init.json}" "${STORAGE_BACKEND:=existing}" "${X10000_ACL:=}" "${X10000_ALLOW_EXPANSION:=false}" "${INGRESS_CONTROLLER:=install}" "${INGRESS_CLASS:=nginx}" "${ENVOY_LB_IP:=}" "${PG_VERSION:=16}" "${KEYCLOAK_ANTIAFFINITY:=required}" "${PG_INSTANCES:=3}" "${PG_VOLUME_SIZE:=20Gi}" "${PG_CPU_REQUEST:=1}" "${PG_MEM_REQUEST:=2Gi}" "${PG_CPU_LIMIT:=4}" "${PG_MEM_LIMIT:=8Gi}" "${PG_MAX_CONNECTIONS:=300}"
+: "${PLATFORM_ADMIN_EMAIL:=admin@${DOMAIN}}" "${VAULT_UI:=false}" "${VAULT_HOST:=vault.${DOMAIN:-}}" "${VAULT_UI_ALLOW:=172.22.100.0/22}" "${SECRETS_BACKEND:=kubernetes}" "${VAULT_NAMESPACE:=vault}" "${VAULT_STORAGE_SIZE:=10Gi}" "${VAULT_INIT_FILE:=$HOME/.etisalat-vault-init.json}" "${STORAGE_BACKEND:=existing}" "${X10000_ACL:=}" "${X10000_ALLOW_EXPANSION:=false}" "${INGRESS_CONTROLLER:=install}" "${INGRESS_CLASS:=nginx}" "${ENVOY_LB_IP:=}" "${PG_VERSION:=16}" "${KEYCLOAK_ANTIAFFINITY:=required}" "${PG_INSTANCES:=3}" "${PG_VOLUME_SIZE:=20Gi}" "${PG_CPU_REQUEST:=1}" "${PG_MEM_REQUEST:=2Gi}" "${PG_CPU_LIMIT:=4}" "${PG_MEM_LIMIT:=8Gi}" "${PG_MAX_CONNECTIONS:=300}"
 export INGRESS_CLASS ENVOY_REPLICAS ENVOY_PDB_MIN_AVAILABLE KEYCLOAK_REPLICAS KEYCLOAK_MEM_REQUEST KEYCLOAK_MEM_LIMIT KEYCLOAK_HEAP INGRESS_ENABLED SMTP_SSL SMTP_STARTTLS INGRESS_TLS_SECRET
 # per-service replicas + CPU/RAM (defaults = live xailon-tf-prod values; an older config.env without these lines still works)
 : "${SVC_TF_ACCOUNTS:=3 50m 64Mi 200m 256Mi}" "${SVC_TF_ADMIN_WEB:=3 none}" "${SVC_TF_AUTH:=3 none}" "${SVC_TF_BABEL:=3 25m 32Mi 300m 256Mi}" "${SVC_TF_CONTROL:=3 none}"
@@ -46,11 +46,11 @@ phase_check(){
   for t in kubectl helm openssl perl python3; do need $t; done   # kubectl+helm come from bundle/tools; the rest are standard on Ubuntu
   [ -f "$KUBECONFIG_FILE" ] || die "KUBECONFIG_FILE=$KUBECONFIG_FILE not found"
   if [ "${IMAGE_MODE:-tar}" = registry ]; then need skopeo; case "$REGISTRY" in registry.etisalat.local*) die "IMAGE_MODE=registry but REGISTRY is still the placeholder name";; esac; fi
-  local bad; bad=$(grep -nE 'REPLACE_' "$ROOT/config.env" | grep -v '^[0-9]*:\s*#' || true)
-  [ "$STORAGE_BACKEND" = hpe-x10000 ] || bad=$(echo "$bad" | grep -v 'X10000_' || true)
+  local bad; bad=$(env | grep -E '^[A-Za-z0-9_]+=.*REPLACE_' || true)   # EFFECTIVE values: a later line in config.env (or an override block) wins over an earlier REPLACE_ line
+  [ "$STORAGE_BACKEND" = hpe-x10000 ] || bad=$(echo "$bad" | grep -v '^X10000_' || true)
   case "$SECRETS_BACKEND" in vault|kubernetes) ;; *) die "SECRETS_BACKEND must be vault or kubernetes";; esac
   case "$STORAGE_BACKEND" in hpe-x10000|existing) ;; *) die "STORAGE_BACKEND must be hpe-x10000 or existing";; esac
-  [ -z "$bad" ] || die "config.env still has REPLACE_ values:"$'\n'"$bad"
+  [ -z "$bad" ] || die "config.env still has REPLACE_ values (name=value):"$'\n'"$bad"
   for v in REGISTRY NAMESPACE DOMAIN TF_TAG BRAND_TAG STORAGE_CLASS SMTP_HOST SMTP_PORT SMTP_USER CH_DATA_SIZE CH_LOG_SIZE; do [ -n "${!v:-}" ] || die "config.env: $v is empty"; done
   case "$REGISTRY" in *://*) die "REGISTRY must be host[:port] without scheme";; esac
   [ "$INGRESS_TLS" = yes ] || die "INGRESS_TLS must be yes: this package deploys the Ingress with TLS only (chart >= 0.17 refuses a plain-HTTP Ingress)"
