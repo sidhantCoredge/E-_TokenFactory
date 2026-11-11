@@ -47,10 +47,17 @@ The last script must end with `image tars: 56 of 56` and `bundle COMPLETE`. Anyt
 Then run the seven checks of 1.1 again.
 
 ### 1.3 Copy the package to the jumphost
-This copies the whole package folder, including the git-ignored `bundle/` and `ai-gateway-platform/` (≈ 6 GB; unchanged files are skipped, old tars that are no longer used are removed; the jumphost has ~16 GB free). Use the folder you checked in 1.1 as the source:
+This copies the whole package folder, including the git-ignored `bundle/` and `ai-gateway-platform/` (≈ 6 GB; unchanged files are skipped, old tars that are no longer used are removed; the jumphost has ~16 GB free). **Do not type a path to the package: `cd` into it and copy "the current folder" (`./`).** First prove that you are in the right folder and that the bundle is complete (the seven checks of 1.1):
 ```
-rsync -avP --delete --exclude .git --exclude Real-values-of-tf-prod.yaml -e "ssh -i ~/.ssh/id_rsa_jumphost" ~/Downloads/E-_TokenFactory/ azureuser@10.40.1.4:~/etisalat/
+cd ~/Downloads/E-_TokenFactory           # YOUR package folder (on the author's Mac: ~/Downloads/E-_TokenFactory-upload)
+ls config.env airgap values zalando      # the four names, no error
+ls bundle/tars/*.tar | wc -l             # must print 56 (if it prints 0 or an error, the bundle is not built: do box A of 1.2 first)
 ```
+Then copy (the trailing `./` is the current folder; `--delete` makes the jumphost folder an exact mirror, so run it only from the package folder):
+```
+rsync -avP --delete --exclude .git --exclude Real-values-of-tf-prod.yaml -e "ssh -i ~/.ssh/id_rsa_jumphost" ./ azureuser@10.40.1.4:~/etisalat/
+```
+`Real-values-of-tf-prod.yaml` (real production values, kept only on the author's Mac, never in git) is excluded so that it never reaches the jumphost.
 It must end without errors. Then log in:
 ```
 ssh -i ~/.ssh/id_rsa_jumphost azureuser@10.40.1.4

@@ -70,8 +70,9 @@ Result: `bundle/tars/*.tar`, `bundle/charts`, `bundle/crds`, `bundle/jars` (the 
 
 **A6. Copy everything to the install VM** (resumable; the folder includes the git-ignored `ai-gateway-platform/` and `bundle/`). First time as written; when you copy again later add `--exclude config.env` so your filled-in file on the VM is not overwritten
 ```
-rsync -avP --exclude .git --exclude Real-values-of-tf-prod.yaml <this package folder>/ <vm-user>@<VM-IP>:~/etisalat/
-# lab: rsync -avP --exclude .git -e "ssh -i ~/.ssh/id_rsa_jumphost" <this package folder>/ azureuser@10.40.1.4:~/etisalat/
+cd ~/Downloads/E-_TokenFactory                 # your package folder: `ls bundle/tars/*.tar | wc -l` must print 56
+rsync -avP --exclude .git --exclude Real-values-of-tf-prod.yaml ./ <vm-user>@<VM-IP>:~/etisalat/
+# lab: see DEPLOY-LAB.md 1.3
 # no network path Mac -> VM (real air-gap)? copy the folder on a USB disk / approved transfer, then `tar -xf` it as ~/etisalat on the VM
 ```
 (MinIO needs no special step any more: since chart 0.17.x its image is Infinia's own build on GHCR and is bundled like the tf-* images.)
