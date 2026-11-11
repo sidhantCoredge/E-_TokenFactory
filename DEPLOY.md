@@ -46,7 +46,7 @@ skopeo inspect --no-tags docker://ghcr.io/infinia-technology/ai-gateway-platform
 ```
 airgap/01-bundle-connected.sh
 ```
-It ends with `== done. total size:` and `image tars: 38 of 38`. Anything listed as `FAILED images` is a real error: fix it and re-run (finished images are skipped). Every image the chart renders is in `airgap/images.txt` (checked by rendering all releases with `helm template`).
+It ends with `== done. total size:` and `image tars: 56 of 56`. Anything listed as `FAILED images` is a real error: fix it and re-run (finished images are skipped). Every image the chart renders is in `airgap/images.txt` (checked by rendering all releases with `helm template`).
 Result: `bundle/tars/*.tar`, `bundle/charts`, `bundle/crds`, `bundle/jars` (the Keycloak plugin jar, see B4), `bundle/tools/helm` and `bundle/tools/kubectl` (Linux binaries for the air-gap side).
 
 **A6. Copy everything to the install VM** (resumable; the folder includes the git-ignored `ai-gateway-platform/` and `bundle/`). First time as written; when you copy again later add `--exclude config.env` so your filled-in file on the VM is not overwritten
@@ -74,8 +74,8 @@ Run everything below **on the install VM**, as the user that owns `~/etisalat`. 
 | 172.22.100.27 | ed-kca-inf-tf-cpu-wrk-004 | worker-4 |
 Check which nodes accept pods with `kubectl get nodes` and `kubectl describe node <n> | grep Taints`; load images on every node that can run pods (normally only the 4 workers).
 
-* Needed from Etisalat before you start: the cluster admin kubeconfig, SSH access from the install VM to the 4 workers with passwordless `sudo`, a StorageClass that allows volume expansion, the TLS certificate + key (PEM) that cover `portal. admin. www. auth. api.<DOMAIN>` (wildcard), the Resend API key (`SMTP_PASSWORD`), and the DNS names of B8.
-* **Firewall (outbound from the workers):** `tcp/465` to `smtp.resend.com` (mail) and `https` to `api.resend.com`. Nothing else leaves the cluster: GeoIP downloads are off, Persona KYC is off, no image is ever pulled from the Internet (images are loaded from the tars).
+* Needed from Etisalat before you start: the cluster admin kubeconfig, SSH access from the install VM to the 4 workers with passwordless `sudo`, the **X10000 storage details** (STORAGE-HPE-CSI.md section 2) and `nfs-common` on the 4 workers, the TLS certificate + key (PEM) that cover `portal. admin. www. auth. api.<DOMAIN>` (wildcard), the Resend API key (`SMTP_PASSWORD`), and the DNS names of B8.
+* **Firewall (outbound from the workers):** `tcp/443` to the X10000 management address and `tcp/2049` to its data IPs (storage, `STORAGE-HPE-CSI.md`); `tcp/465` to `smtp.resend.com` (mail) and `https` to `api.resend.com`. Nothing else leaves the cluster: GeoIP downloads are off, Persona KYC is off, no image is ever pulled from the Internet (images are loaded from the tars).
 * **Traffic path: MetalLB direct (no Cloudflare).** `portal. admin. www. auth.<DOMAIN>` → the existing Ingress-NGINX on `172.22.100.241`; `api.<DOMAIN>` → Envoy on `172.22.100.242` (`ENVOY_LB_IP`, a free IP of the pool `172.22.100.241-250`). Envoy terminates TLS itself, so the certificate must also cover `api.<DOMAIN>` (a wildcard `*.<DOMAIN>` does). Create the DNS records in B8. (A Cloudflare tunnel is optional and not used: Part M.)
 
 ### B1. Log in and enter the package
@@ -88,7 +88,8 @@ ls                                  # must show: airgap  ai-gateway-platform  bu
 ```
 for t in bash perl python3 openssl tar ssh scp; do command -v $t >/dev/null && echo "ok $t" || echo "MISSING $t"; done
 ls ai-gateway-platform/helm/tokenfactory/templates/ingress.yaml bundle/tars/INDEX bundle/tools/helm bundle/tools/kubectl bundle/jars/*.jar
-ls bundle/tars/*.tar | wc -l                      # must print 38
+ls bundle/tars/*.tar | wc -l                      # must print 56
+ls bundle/charts/hpe-csi-driver-3.2.0.tgz         # the HPE CSI chart (storage)
 cp <path-of-the-cluster-admin-kubeconfig> ~/etisalat.kubeconfig && chmod 600 ~/etisalat.kubeconfig
 export PATH=~/etisalat/bundle/tools:$PATH
 kubectl --kubeconfig ~/etisalat.kubeconfig get nodes -o wide        # all 7 Ready (3 masters .21-.23, 4 workers .24-.27); the API answers on the VIP 172.22.100.240
@@ -96,8 +97,7 @@ kubectl --kubeconfig ~/etisalat.kubeconfig get ingressclass           # the exis
 kubectl --kubeconfig ~/etisalat.kubeconfig get svc -A | grep -i ingress        # its Service: EXTERNAL-IP 172.22.100.241 (MetalLB)
 kubectl --kubeconfig ~/etisalat.kubeconfig -n metallb-system get ipaddresspool 2>/dev/null       # pool 172.22.100.241-250
 kubectl --kubeconfig ~/etisalat.kubeconfig get nodes --no-headers | grep -c ' Ready'      # >= 3
-kubectl --kubeconfig ~/etisalat.kubeconfig get sc                    # pick the StorageClass for STORAGE_CLASS
-kubectl --kubeconfig ~/etisalat.kubeconfig get sc <name> -o jsonpath='{.allowVolumeExpansion}{"\n"}'      # must print true
+kubectl --kubeconfig ~/etisalat.kubeconfig get sc                    # existing StorageClasses (the storage for TokenFactory comes from the HPE X10000: STORAGE-HPE-CSI.md)
 kubectl --kubeconfig ~/etisalat.kubeconfig describe node <worker> | grep -i taints     # workers must accept normal pods (Taints: <none>)
 ```
 If a tool is missing (only `perl`, `python3`, `openssl` are ever needed) install it from the VM's OS package mirror. `make`, `envsubst`, `skopeo` are NOT needed here.
@@ -153,13 +153,24 @@ export INGRESS_CLASS="nginx"                    # kubectl get ingressclass  -> u
 export TLS_CERT="/home/<vm-user>/etisalat-tls/tls.crt"
 export TLS_KEY="/home/<vm-user>/etisalat-tls/tls.key"
 export DOMAIN="<the Etisalat domain, e.g. tokenfactory.etisalat.ae>"
-export STORAGE_CLASS="<storageclass from B2>"
+export STORAGE_BACKEND="hpe-x10000"            # storage = HPE Alletra Storage MP X10000 over NFSv4.1; the package installs the HPE CSI driver and creates the StorageClass. Read STORAGE-HPE-CSI.md first
+export STORAGE_CLASS="hpe-standard-file"
+export X10000_MGMT="<X10000 management IP or FQDN>"
+export X10000_CLIENT_ID="<CSP client id from the storage admin>"
+export X10000_ACL="172.22.100.24,172.22.100.25,172.22.100.26,172.22.100.27"    # clients allowed to mount the exports: the 4 workers
+export X10000_ALLOW_EXPANSION="false"
+export SECRETS_BACKEND="vault"                # secrets live in a DEDICATED HashiCorp Vault inside this cluster (installed by the package, like prod). VAULT-SECRETS.md. "kubernetes" = no Vault
+export VAULT_STORAGE_SIZE="10Gi"
+export VAULT_UI="true"                         # open the Vault web UI at https://vault.<DOMAIN> (needs DNS + a certificate that covers it); "false" = no UI. VAULT-SECRETS.md section 2b
+export VAULT_UI_ALLOW="172.22.100.0/22"         # networks allowed to open the UI
 export NODE_LOAD_MODE="ssh"
 export NODES="<ssh-user>@172.22.100.24 <ssh-user>@172.22.100.25 <ssh-user>@172.22.100.26 <ssh-user>@172.22.100.27"
 export SMTP_HOST="smtp.resend.com" ; export SMTP_PORT="465" ; export SMTP_USER="resend" ; export SMTP_SSL="true" ; export SMTP_STARTTLS="false"
 export SMTP_PASSWORD="<the Resend API key>"
 export SUPPORT_EMAIL="support@iamsaif.ai"      # the sender verified at Resend
 ```
+**Vault:** `SECRETS_BACKEND="vault"` installs the Vault and fills it in phases `vault` and `secrets`. After B7, **copy `~/.etisalat-vault-init.json` (the unseal keys and root token) to a safe offline place**; Vault starts sealed after every restart and `airgap/deploy-all.sh vault` unseals it again (`VAULT-SECRETS.md`).
+The X10000 client **secret** is not written in `config.env`; give it in the shell right before B7 (and before any run of the `storage` phase): `read -rs X10000_CLIENT_SECRET; export X10000_CLIENT_SECRET`. The storage team must first provide the items of `STORAGE-HPE-CSI.md` section 2 (management address, client ID + secret, capacity, NFS access for the workers).
 `TF_TAG`, `BRAND_TAG`, `CHART_REF` are already filled (Part A). Replicas, CPU/RAM, Keycloak, Postgres and Envoy sizing are the `SIZING & HA` lines of the same file: their defaults are the **live `xailon-tf-prod` values** (Part D) and normally need no change. Nothing may still say `REPLACE_`:
 ```
 grep -n REPLACE_ config.env | grep -v '^[0-9]*:#' || echo "config.env complete"
@@ -171,9 +182,9 @@ airgap/deploy-all.sh dry-run
 It must end with `dry-run PASSED`. If it stops with a `FATAL:` line, fix what it says and run it again.
 
 ### B6b. Images reach the nodes (done by the `images` phase of B7; shown here so you know what happens)
-In `ssh` mode (set in B5) the VM copies the 38 tars to every worker with `scp` and runs `sudo ctr -n k8s.io images import` there. **No container image and no registry are needed.** After the `images` phase, on any worker:
+In `ssh` mode (set in B5) the VM copies the 56 tars to every worker with `scp` and runs `sudo ctr -n k8s.io images import` there. **No container image and no registry are needed.** After the `images` phase, on any worker:
 ```
-sudo ctr -n k8s.io images ls -q | grep -c registry.etisalat.local          # must print 38 or more (digest-pinned images appear twice)
+sudo ctr -n k8s.io images ls -q | grep -c registry.etisalat.local          # must print 56 or more (digest-pinned images appear twice)
 ```
 No SSH to the workers at all? Copy `bundle/tars/` to each worker by hand (USB/scp) and on **every** worker run `cd <folder-with-tars> && for f in *.tar; do sudo ctr -n k8s.io images import --all-platforms $f; done`; **then also tag the digest-pinned images** (the loader normally does this): on the VM `awk -F'|' '$3!=""{r=$2; sub(/:pinned-.*/,"",r); print "sudo ctr -n k8s.io images tag --force " $2 " " r "@sha256:" $3}' bundle/tars/INDEX > ~/tag-pins.sh`, copy `tag-pins.sh` to every worker and run `bash tag-pins.sh` there (prefer fixing SSH instead). Then run B7 without the `images` phase: `airgap/deploy-all.sh check prepare render ns jar pg secrets controllers ingress openmeter app verify`.
 
@@ -181,7 +192,7 @@ No SSH to the workers at all? Copy `bundle/tars/` to each worker by hand (USB/sc
 ```
 airgap/deploy-all.sh all 2>&1 | tee ~/etisalat-deploy.log
 ```
-Order, with what each prints: `check` → `prepare` → `render` → `ns` → **`images`** (loads all tars into every worker; ends with `ALL 38 IMAGES PRESENT`) → **`jar`** (hosts the Keycloak plugin jar in the cluster) → `pg` (Postgres HA, waits for Running) → `secrets` → `controllers` (Envoy Gateway + AI Gateway) → `ingress` → `openmeter` (slowest, up to 60 min) → `app` → `verify`. Total 40–90 min. If anything fails, fix the cause and continue where it stopped:
+Order, with what each prints: `check` → `prepare` → `render` → `ns` → **`images`** (loads all tars into every worker; ends with `ALL 56 IMAGES PRESENT`) → **`jar`** (hosts the Keycloak plugin jar in the cluster) → **`storage`** (HPE CSI driver + StorageClass on the X10000, see `STORAGE-HPE-CSI.md`) → **`vault`** (dedicated in-cluster HashiCorp Vault + Secrets Store CSI driver, initialized and unsealed, see `VAULT-SECRETS.md`) → `pg` (Postgres HA, waits for Running) → `secrets` → `controllers` (Envoy Gateway + AI Gateway) → `ingress` → `openmeter` (slowest, up to 60 min) → `app` → `verify`. Total 40–90 min. If anything fails, fix the cause and continue where it stopped:
 ```
 airgap/deploy-all.sh --from <phase>        # e.g. --from openmeter
 ```
@@ -193,6 +204,7 @@ Never delete `~/.etisalat-service-keys.env` (created by the `secrets` phase; eve
 |---|---|
 | `portal.<DOMAIN>`, `admin.<DOMAIN>`, `www.<DOMAIN>`, `auth.<DOMAIN>` | `172.22.100.241` (existing Ingress-NGINX) |
 | `api.<DOMAIN>` | `172.22.100.242` (Envoy, `ENVOY_LB_IP`) |
+| `vault.<DOMAIN>` (only if `VAULT_UI="true"`) | `172.22.100.241` (the same ingress controller) |
 Check without DNS first (replace `<DOMAIN>`):
 ```
 for h in www portal admin; do curl -sk -o /dev/null -w "$h %{http_code}\n" --resolve $h.<DOMAIN>:443:172.22.100.241 https://$h.<DOMAIN>/; done        # 200 200 200
@@ -217,6 +229,9 @@ kubectl -n tokenfactory get ingress tokenfactory
 kubectl -n tokenfactory get pods -l app.kubernetes.io/name=keycloak-spi      # 2 pods Running
 kubectl -n tokenfactory logs deploy/tf-ledger --tail=200 | grep -i leader      # one replica logs "this replica is the tf-ledger singleton leader"
 kubectl -n tokenfactory get secret tf-etisalat-ingress-tls
+kubectl -n vault get pods                                      # vault-0 Running, vault-csi-provider pods Running
+kubectl -n vault exec vault-0 -- vault status | grep -E "Initialized|Sealed"       # Initialized true, Sealed false
+kubectl -n tokenfactory get secret tokenfactory-secrets        # synced from Vault (19 keys)
 ```
 ### B10. Etisalat brand + feature gate (the verification the developer's overlay asks for). The scripts are in the repo copy; they need `curl` and `python3`, and they read the release `tokenfactory` in namespace `tokenfactory`. The lab has no DNS, so first map the names on this VM (real Etisalat: DNS exists, skip these two lines):
 ```
@@ -414,6 +429,7 @@ After any Ingress edit: `kubectl -n tokenfactory get ingress tokenfactory -o yam
 | A value that has no key in the template yet | add the key exactly as it appears in the chart's `values.yaml` (see `ai-gateway-platform/helm/tokenfactory/values-tf-prod.yaml` for every available key and its comment); lists such as `tf-ledger.env` are **replaced wholesale** — copy the whole list from `values-tf-etisalat.yaml` and change the one entry |
 
 ## PART K — `tokenfactory-secrets`: what the developer's overlay requires, and what `deploy-all.sh secrets` creates
+> With `SECRETS_BACKEND="vault"` (default) the values below are generated into the dedicated Vault (`secret/tokenfactory`) and synced into the Secret by the Secrets Store CSI driver: see `VAULT-SECRETS.md`. The key list and meanings are the same; "created by the script" means "written to Vault by the script".
 The overlay sets `global.secrets.existingSecret: tokenfactory-secrets` (the chart then renders no Secret of its own). `deploy-all.sh secrets` creates it with fresh random values; nothing is copied from another environment.
 | Key (from the overlay header) | Needed | Created by the script |
 |---|---|---|
@@ -483,7 +499,7 @@ export DEST_TLS_VERIFY="true"                            # "false" only for a se
 Run it as part of the normal flow or alone:
 ```
 cd ~/etisalat
-airgap/deploy-all.sh images          # IMAGE_MODE=registry -> airgap/02-push-registry.sh (38 images)
+airgap/deploy-all.sh images          # IMAGE_MODE=registry -> airgap/02-push-registry.sh (56 images)
 ```
 It ends with `registry push complete` after proving that the `@sha256` images (Keycloak, OpenFGA, Postgres, Redis, MinIO, curl, busybox 1.36, OpenMeter) resolve **by digest**. Plain `docker pull/tag/push` would change those digests and the pods would never start — always push with this script.
 Harbor: the project must exist first (`unauthorized`/`project not found` otherwise), and the three digest-pinned images need the project to allow tags that look like `pinned-<digest>` (no tag-immutability rule that blocks them).

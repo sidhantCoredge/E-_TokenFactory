@@ -1,0 +1,21 @@
+# HashiCorp Vault (chart hashicorp/vault 0.32.0, Vault 1.21.2) - a DEDICATED, standalone Vault for this Etisalat cluster (same layout as the one tokenfactory-prod uses:
+# one pod, file storage on a PVC, Vault CSI provider for the Secrets Store CSI driver). Placeholders come from config.env.
+global:
+  tlsDisable: true                        # in-cluster traffic only (http://vault.${VAULT_NAMESPACE}.svc:8200); nothing is exposed outside the cluster
+injector:
+  enabled: false                          # not used: secrets reach the pods through the Secrets Store CSI driver
+server:
+  image: { repository: "${REGISTRY}/hashicorp/vault", tag: "1.21.2" }
+  standalone: { enabled: true }           # chart default config: file storage in /vault/data, listener :8200 (no TLS inside the cluster)
+  ha: { enabled: false }
+  dataStorage: { enabled: true, size: "${VAULT_STORAGE_SIZE}", storageClass: "${STORAGE_CLASS}" }
+  authDelegator: { enabled: true }        # lets Vault validate pod tokens (Kubernetes auth) with its own ServiceAccount
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits:   { cpu: "1",  memory: 1Gi }
+  ui: { enabled: ${VAULT_UI} }              # the web UI (served through the Ingress below only when VAULT_UI=true)
+csi:
+  enabled: true                           # the Vault provider DaemonSet for the Secrets Store CSI driver
+  image: { repository: "${REGISTRY}/hashicorp/vault-csi-provider", tag: "1.7.0" }
+  agent:
+    image: { repository: "${REGISTRY}/hashicorp/vault", tag: "1.21.2" }

@@ -1,0 +1,32 @@
+# Chart-owned Vault -> Secret sync (same mechanism as tf-stage / tokenfactory-prod): SecretProviderClass + the small "syncer" Deployment whose CSI mount makes
+# the driver create the Secret `tokenfactory-secrets`. Used when SECRETS_BACKEND=vault. Placeholders come from config.env.
+vaultSync:
+  enabled: true
+  name: vault-tokenfactory
+  secretName: tokenfactory-secrets
+  vaultAddress: http://vault.${VAULT_NAMESPACE}.svc.cluster.local:8200
+  roleName: tokenfactory
+  vaultKubernetesMountPath: kubernetes
+  secretPath: secret/data/tokenfactory
+  serviceAccountName: tf-vault-sync       # created by the `secrets` phase and bound to the Vault role
+  syncerImage: ${REGISTRY}/pause:3.10
+  keys:
+    - db-password
+    - jwt-secret
+    - portal-jwt-secret
+    - admin-api-key
+    - encryption-key
+    - ce-userinfo-signing-key
+    - auth-state-signing-key
+    - kc-admin-username
+    - kc-admin-password
+    - kc-db-username
+    - kc-db-password
+    - openfga-db-password
+    - s3-access-key
+    - s3-secret-key
+    - stripe-webhook-secret
+    - stripe-secret-key
+    - smtp-password
+    - platform-admin-password
+    - platform-init-admin-password

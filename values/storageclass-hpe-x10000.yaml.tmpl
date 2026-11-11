@@ -1,0 +1,21 @@
+# StorageClass on the HPE Alletra Storage MP X10000 (NFSv4.1 exports through the HPE CSI Driver). Placeholders come from config.env.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: ${STORAGE_CLASS}
+provisioner: csi.hpe.com
+parameters:
+  csi.storage.k8s.io/controller-publish-secret-name: hpe-backend
+  csi.storage.k8s.io/controller-publish-secret-namespace: hpe-storage
+  csi.storage.k8s.io/node-publish-secret-name: hpe-backend
+  csi.storage.k8s.io/node-publish-secret-namespace: hpe-storage
+  csi.storage.k8s.io/provisioner-secret-name: hpe-backend
+  csi.storage.k8s.io/provisioner-secret-namespace: hpe-storage
+  description: "TokenFactory (Etisalat): NFSv4.1 export on the Alletra Storage MP X10000"
+  accessProtocol: nfs                     # mandatory for the X10000 (the CSI default would be iscsi)
+  accessControlList: "${X10000_ACL}"      # who may mount the exports: the worker nodes (comma separated IPs / CIDRs / names, max 50 entries)
+reclaimPolicy: Retain                     # a deleted PVC keeps its export (and the data) until an admin removes it: safer for databases. Use Delete only for throw-away data
+allowVolumeExpansion: ${X10000_ALLOW_EXPANSION}
+volumeBindingMode: Immediate
+mountOptions:
+  - vers=4.1                              # mandatory: client/server negotiation fails without it (HPE X10000 CSP guide)

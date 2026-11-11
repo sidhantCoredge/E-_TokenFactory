@@ -1,0 +1,26 @@
+# HPE CSI Driver for Kubernetes 3.2.0 (chart hpe-csi-driver) - ONLY the Alletra Storage MP X10000 NFS CSP. Placeholders come from config.env.
+# Air-gap: every image is loaded from the bundle tars (names carry the fixed prefix ${REGISTRY}), nothing is pulled from the Internet.
+disable:                                  # keep only the X10000 file (NFS) CSP; the other CSPs are not needed and their images are not bundled
+  nimble: true
+  primera: true
+  alletra6000: true
+  alletra9000: true
+  alletraStorageMP: true
+  b10000FileService: true
+  x10000FileService: false
+disableNodeConformance: true              # the chart must NOT try to install iSCSI/multipath/NFS packages (no package mirror in the air-gap): install nfs-common on the workers yourself (STORAGE-HPE-CSI.md, step 3)
+disableNodeConfiguration: true            # no iSCSI/multipath service configuration (NFS only)
+imagePullPolicy: IfNotPresent
+images:
+  csiNodeDriver: ${REGISTRY}/hpestorage/csi-driver:v3.2.0
+  csiControllerDriver: ${REGISTRY}/hpestorage/csi-driver:v3.2.0
+  x10000FileServiceCSP: ${REGISTRY}/hpestorage/alletrastoragemp-x10000-nfs-csp:v1.0.0
+  csiExtensions: ${REGISTRY}/hpestorage/csi-extensions:v1.2.11
+  csiVolumeGroupProvisioner: ${REGISTRY}/hpestorage/volume-group-provisioner:v1.0.10
+  csiVolumeGroupSnapshotter: ${REGISTRY}/hpestorage/volume-group-snapshotter:v1.0.10
+  csiVolumeMutator: ${REGISTRY}/hpestorage/volume-mutator:v1.3.10
+  csiAttacher: ${REGISTRY}/sig-storage/csi-attacher:v4.12.0
+  csiNodeDriverRegistrar: ${REGISTRY}/sig-storage/csi-node-driver-registrar:v2.17.0
+  csiProvisioner: ${REGISTRY}/sig-storage/csi-provisioner:v6.2.0
+  csiResizer: ${REGISTRY}/sig-storage/csi-resizer:v2.1.0
+  csiSnapshotter: ${REGISTRY}/sig-storage/csi-snapshotter:v8.5.0

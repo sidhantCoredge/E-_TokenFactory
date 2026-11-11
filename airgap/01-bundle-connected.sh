@@ -59,6 +59,16 @@ tok=$(curl -s "https://ghcr.io/token?scope=repository:nginx/charts/nginx-ingress
 m=$(curl -s -H "Authorization: Bearer $tok" -H "Accept: application/vnd.oci.image.manifest.v1+json" https://ghcr.io/v2/nginx/charts/nginx-ingress/manifests/1.3.2)
 d=$(echo "$m" | python3 -c 'import sys,json;m=json.load(sys.stdin);print([l["digest"] for l in m["layers"] if "chart" in l["mediaType"]][0])')
 curl -sfL -H "Authorization: Bearer $tok" -o "$BUNDLE_DIR/charts/nginx-ingress-1.3.2.tgz" "https://ghcr.io/v2/nginx/charts/nginx-ingress/blobs/$d"; echo "  nginx-ingress-1.3.2.tgz"
+# Vault + Secrets Store CSI driver charts (phase `vault`)
+helm repo add hashicorp https://helm.releases.hashicorp.com >/dev/null 2>&1 || true
+helm repo add secrets-store-csi-driver https://kubernetes-sigs.github.io/secrets-store-csi-driver/charts >/dev/null 2>&1 || true
+helm repo update hashicorp secrets-store-csi-driver >/dev/null 2>&1 || true
+[ -s "$BUNDLE_DIR/charts/vault-0.32.0.tgz" ] || helm pull hashicorp/vault --version 0.32.0 -d "$BUNDLE_DIR/charts"
+[ -s "$BUNDLE_DIR/charts/secrets-store-csi-driver-1.5.6.tgz" ] || helm pull secrets-store-csi-driver/secrets-store-csi-driver --version 1.5.6 -d "$BUNDLE_DIR/charts"
+echo "  vault-0.32.0.tgz secrets-store-csi-driver-1.5.6.tgz"
+# HPE CSI Driver chart (X10000 NFS storage, phase `storage`)
+[ -s "$BUNDLE_DIR/charts/hpe-csi-driver-3.2.0.tgz" ] || { helm repo add hpe-storage https://hpe-storage.github.io/co-deployments/ >/dev/null 2>&1 || true; helm repo update hpe-storage >/dev/null 2>&1 || true; helm pull hpe-storage/hpe-csi-driver --version 3.2.0 -d "$BUNDLE_DIR/charts"; }
+echo "  hpe-csi-driver-3.2.0.tgz"
 curl -fsSL -o "$BUNDLE_DIR/crds/gateway-api-standard-install-v1.3.0.yaml" https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.3.0/standard-install.yaml
 
 echo "== keycloak SPI jar + helm (linux-amd64) =="

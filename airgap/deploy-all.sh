@@ -4,10 +4,10 @@
 #   ./deploy-all.sh dry-run          render EVERY chart offline with helm template (no cluster needed) - run this first
 #   ./deploy-all.sh all              check -> prepare -> render -> ns -> images -> pg -> secrets -> controllers -> ingress -> openmeter -> app -> verify
 #   ./deploy-all.sh <phase> [...]    run specific phases;   ./deploy-all.sh --from <phase>   resume from a phase
-# Phases: check prepare render ns images jar pg secrets controllers ingress openmeter app verify   (push = optional, only if you DO have a registry)
+# Phases: check prepare render ns images jar storage vault pg secrets controllers ingress openmeter app verify   (push = optional, only if you DO have a registry)
 set -euo pipefail
 cd "$(dirname "$0")"; . ./env.sh
-PHASES=(check prepare render ns images jar pg secrets controllers ingress openmeter app verify)
+PHASES=(check prepare render ns images jar storage vault pg secrets controllers ingress openmeter app verify)
 ALLPH=(push "${PHASES[@]}")
 OUT="$ROOT/rendered"; KEYFILE="${KEYFILE:-$HOME/.etisalat-service-keys.env}"
 C="$BUNDLE_DIR/charts"; ZC="$ROOT/zalando/charts"
@@ -17,7 +17,7 @@ need(){ command -v "$1" >/dev/null 2>&1 || die "missing tool: $1"; }
 wait_for(){ # desc timeout_s cmd...
   local d="$1" t="$2"; shift 2; local s=$SECONDS
   until "$@" >/dev/null 2>&1; do [ $((SECONDS-s)) -gt "$t" ] && die "timeout (${t}s) waiting for: $d"; sleep 5; done; echo "  ok: $d"; }
-VARS='REGISTRY TF_TAG BRAND_TAG DOMAIN SUPPORT_EMAIL STORAGE_CLASS PLATFORM_ADMIN_EMAIL SMTP_HOST SMTP_PORT SMTP_USER KEYCLOAK_JAR_URL DOCS_WEB_ENABLED ENVOY_REPLICAS ENVOY_PDB_MIN_AVAILABLE KEYCLOAK_REPLICAS KEYCLOAK_MEM_REQUEST KEYCLOAK_MEM_LIMIT KEYCLOAK_HEAP INGRESS_ENABLED SMTP_SSL SMTP_STARTTLS INGRESS_TLS_SECRET TF_LEDGER_REPLICAS INGRESS_CLASS'
+VARS='REGISTRY TF_TAG BRAND_TAG DOMAIN SUPPORT_EMAIL STORAGE_CLASS PLATFORM_ADMIN_EMAIL SMTP_HOST SMTP_PORT SMTP_USER KEYCLOAK_JAR_URL DOCS_WEB_ENABLED ENVOY_REPLICAS ENVOY_PDB_MIN_AVAILABLE KEYCLOAK_REPLICAS KEYCLOAK_MEM_REQUEST KEYCLOAK_MEM_LIMIT KEYCLOAK_HEAP INGRESS_ENABLED SMTP_SSL SMTP_STARTTLS INGRESS_TLS_SECRET TF_LEDGER_REPLICAS INGRESS_CLASS X10000_ACL X10000_ALLOW_EXPANSION VAULT_NAMESPACE VAULT_STORAGE_SIZE VAULT_UI VAULT_HOST VAULT_UI_ALLOW'
 # Keycloak SPI jar: empty KEYCLOAK_JAR_URL = host the bundled jar inside the cluster (phase `jar`)
 JAR_FILE="$(ls "$BUNDLE_DIR"/jars/*.jar 2>/dev/null | sort -V | tail -1 || true)"   # newest version if several jars are present; JAR_INCLUSTER=0
 if [ -z "${KEYCLOAK_JAR_URL:-}" ]; then JAR_INCLUSTER=1; KEYCLOAK_JAR_URL="http://keycloak-spi.${NAMESPACE}.svc.cluster.local:8080/$(basename "${JAR_FILE:-keycloak-2fa-email-authenticator.jar}")"; fi
@@ -26,7 +26,7 @@ export KEYCLOAK_JAR_URL
 : "${ENVOY_REPLICAS:=6}" "${ENVOY_PDB_MIN_AVAILABLE:=1}" "${KEYCLOAK_REPLICAS:=3}" "${KEYCLOAK_MEM_REQUEST:=1Gi}" "${KEYCLOAK_MEM_LIMIT:=2Gi}"
 : "${KEYCLOAK_HEAP:=-Xms512m -Xmx2g -XX:+UseContainerSupport}" "${INGRESS_ENABLED:=true}"
 : "${SMTP_SSL:=true}" "${SMTP_STARTTLS:=false}" "${EXPOSE:=loadbalancer}" "${BEHIND_CLOUDFLARE:=no}" "${INGRESS_TLS:=yes}" "${INGRESS_TLS_SECRET:=tf-etisalat-tls}"   # older config.env keeps the old behaviour
-: "${INGRESS_CONTROLLER:=install}" "${INGRESS_CLASS:=nginx}" "${ENVOY_LB_IP:=}" "${PG_VERSION:=16}" "${KEYCLOAK_ANTIAFFINITY:=required}" "${PG_INSTANCES:=3}" "${PG_VOLUME_SIZE:=20Gi}" "${PG_CPU_REQUEST:=1}" "${PG_MEM_REQUEST:=2Gi}" "${PG_CPU_LIMIT:=4}" "${PG_MEM_LIMIT:=8Gi}" "${PG_MAX_CONNECTIONS:=300}"
+: "${VAULT_UI:=false}" "${VAULT_HOST:=vault.${DOMAIN:-}}" "${VAULT_UI_ALLOW:=172.22.100.0/22}" "${SECRETS_BACKEND:=kubernetes}" "${VAULT_NAMESPACE:=vault}" "${VAULT_STORAGE_SIZE:=10Gi}" "${VAULT_INIT_FILE:=$HOME/.etisalat-vault-init.json}" "${STORAGE_BACKEND:=existing}" "${X10000_ACL:=}" "${X10000_ALLOW_EXPANSION:=false}" "${INGRESS_CONTROLLER:=install}" "${INGRESS_CLASS:=nginx}" "${ENVOY_LB_IP:=}" "${PG_VERSION:=16}" "${KEYCLOAK_ANTIAFFINITY:=required}" "${PG_INSTANCES:=3}" "${PG_VOLUME_SIZE:=20Gi}" "${PG_CPU_REQUEST:=1}" "${PG_MEM_REQUEST:=2Gi}" "${PG_CPU_LIMIT:=4}" "${PG_MEM_LIMIT:=8Gi}" "${PG_MAX_CONNECTIONS:=300}"
 export INGRESS_CLASS ENVOY_REPLICAS ENVOY_PDB_MIN_AVAILABLE KEYCLOAK_REPLICAS KEYCLOAK_MEM_REQUEST KEYCLOAK_MEM_LIMIT KEYCLOAK_HEAP INGRESS_ENABLED SMTP_SSL SMTP_STARTTLS INGRESS_TLS_SECRET
 # per-service replicas + CPU/RAM (defaults = live xailon-tf-prod values; an older config.env without these lines still works)
 : "${SVC_TF_ACCOUNTS:=3 50m 64Mi 200m 256Mi}" "${SVC_TF_ADMIN_WEB:=3 none}" "${SVC_TF_AUTH:=3 none}" "${SVC_TF_BABEL:=3 25m 32Mi 300m 256Mi}" "${SVC_TF_CONTROL:=3 none}"
@@ -47,6 +47,9 @@ phase_check(){
   [ -f "$KUBECONFIG_FILE" ] || die "KUBECONFIG_FILE=$KUBECONFIG_FILE not found"
   if [ "${IMAGE_MODE:-tar}" = registry ]; then need skopeo; case "$REGISTRY" in registry.etisalat.local*) die "IMAGE_MODE=registry but REGISTRY is still the placeholder name";; esac; fi
   local bad; bad=$(grep -nE 'REPLACE_' "$ROOT/config.env" | grep -v '^[0-9]*:\s*#' || true)
+  [ "$STORAGE_BACKEND" = hpe-x10000 ] || bad=$(echo "$bad" | grep -v 'X10000_' || true)
+  case "$SECRETS_BACKEND" in vault|kubernetes) ;; *) die "SECRETS_BACKEND must be vault or kubernetes";; esac
+  case "$STORAGE_BACKEND" in hpe-x10000|existing) ;; *) die "STORAGE_BACKEND must be hpe-x10000 or existing";; esac
   [ -z "$bad" ] || die "config.env still has REPLACE_ values:"$'\n'"$bad"
   for v in REGISTRY NAMESPACE DOMAIN TF_TAG BRAND_TAG STORAGE_CLASS SMTP_HOST SMTP_PORT SMTP_USER CH_DATA_SIZE CH_LOG_SIZE; do [ -n "${!v:-}" ] || die "config.env: $v is empty"; done
   case "$REGISTRY" in *://*) die "REGISTRY must be host[:port] without scheme";; esac
@@ -58,13 +61,17 @@ phase_check(){
   fi
   if [ "$NODE_LOAD_MODE" = ssh ] && [ "${IMAGE_MODE:-tar}" = tar ]; then [ -n "${NODES// /}" ] || die "NODE_LOAD_MODE=ssh needs NODES in config.env"; fi
   [ -d "$REPO/helm/tokenfactory" ] || die "repo not found at $REPO (run airgap/00-fetch-chart.sh on the Mac and copy the whole folder to the VM)"
+  if [ "$SECRETS_BACKEND" = vault ]; then for f in vault-0.32.0 secrets-store-csi-driver-1.5.6; do [ -f "$BUNDLE_DIR/charts/$f.tgz" ] || die "bundle file missing: charts/$f.tgz (re-run airgap/01-bundle-connected.sh on the Mac)"; done; fi
+  if [ "$STORAGE_BACKEND" = hpe-x10000 ]; then [ -f "$BUNDLE_DIR/charts/hpe-csi-driver-3.2.0.tgz" ] || die "bundle file missing: charts/hpe-csi-driver-3.2.0.tgz (re-run airgap/01-bundle-connected.sh on the Mac)"; fi
   for f in charts/gateway-helm-v1.8.1.tgz charts/ai-gateway-crds-helm-v1.0.0.tgz charts/ai-gateway-helm-v1.0.0.tgz charts/nginx-ingress-1.3.2.tgz crds/gateway-api-standard-install-v1.3.0.yaml; do [ -f "$BUNDLE_DIR/$f" ] || die "bundle file missing: $f"; done
   if [ $DRY = 0 ]; then
     kubectl version --request-timeout=10s >/dev/null 2>&1 || die "kubectl cannot reach the cluster"
     local n; n=$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready' || true); echo "  ready nodes: $n"
     if [ "${SINGLE_NODE:-no}" = yes ]; then echo "  SINGLE_NODE=yes (lab): Postgres will run 1 instance"; else [ "$n" -ge 3 ] || die "need >=3 Ready nodes (pgdb has 3 instances with anti-affinity); for a 1-node lab set SINGLE_NODE=yes"; fi
-    kubectl get sc "$STORAGE_CLASS" >/dev/null 2>&1 || die "StorageClass '$STORAGE_CLASS' not found (kubectl get sc)"
-    [ "$(kubectl get sc "$STORAGE_CLASS" -o jsonpath='{.allowVolumeExpansion}')" = "true" ] || echo "  WARNING: StorageClass $STORAGE_CLASS has allowVolumeExpansion!=true"
+    if [ "$STORAGE_BACKEND" = existing ]; then
+      kubectl get sc "$STORAGE_CLASS" >/dev/null 2>&1 || die "StorageClass '$STORAGE_CLASS' not found (kubectl get sc)"
+      [ "$(kubectl get sc "$STORAGE_CLASS" -o jsonpath='{.allowVolumeExpansion}')" = "true" ] || echo "  WARNING: StorageClass $STORAGE_CLASS has allowVolumeExpansion!=true"
+    else echo "  StorageClass $STORAGE_CLASS will be created by phase storage (HPE X10000)"; fi
     if [ "$PG_OPERATOR_MODE" = existing ]; then kubectl get crd postgresqls.acid.zalan.do >/dev/null 2>&1 || die "PG_OPERATOR_MODE=existing but no postgresqls.acid.zalan.do CRD"; fi
     [ -s "$BUNDLE_DIR/tars/INDEX" ] || die "image tars missing: $BUNDLE_DIR/tars (copy the bundle)"
   fi
@@ -133,6 +140,23 @@ phase_render(){
     ! grep -q '\${' "$OUT/$n.yaml" || die "unreplaced \${VAR} in $OUT/$n.yaml: $(grep -n '\${' "$OUT/$n.yaml" | head -2)"
   done
   gen_services
+  if [ "$STORAGE_BACKEND" = hpe-x10000 ]; then
+    for n in hpe-csi:values/hpe-csi.values.yaml.tmpl storageclass-hpe-x10000:values/storageclass-hpe-x10000.yaml.tmpl; do
+      envsub $VARS < "$ROOT/${n#*:}" > "$OUT/${n%%:*}.yaml"; ! grep -q '\${' "$OUT/${n%%:*}.yaml" || die "unreplaced \${VAR} in $OUT/${n%%:*}.yaml"
+    done
+    echo "  hpe-csi.yaml and storageclass-hpe-x10000.yaml rendered"
+  fi
+  echo '{}' > "$OUT/vaultsync.yaml"
+  if [ "$SECRETS_BACKEND" = vault ]; then
+    for n in vault:vault.values.yaml.tmpl secrets-store-csi:secrets-store-csi.values.yaml.tmpl vaultsync:vaultsync.values.yaml.tmpl; do
+      envsub $VARS < "$ROOT/values/${n#*:}" > "$OUT/${n%%:*}.yaml"; ! grep -q '\${' "$OUT/${n%%:*}.yaml" || die "unreplaced \${VAR} in $OUT/${n%%:*}.yaml"
+    done
+    if [ "$VAULT_UI" = true ]; then
+      [ -n "${VAULT_HOST:-}" ] || die "VAULT_UI=true needs VAULT_HOST in config.env"
+      envsub $VARS < "$ROOT/values/vault-ingress.yaml.tmpl" > "$OUT/vault-ingress.yaml"; ! grep -q '\${' "$OUT/vault-ingress.yaml" || die "unreplaced \${VAR} in $OUT/vault-ingress.yaml"
+    fi
+    echo "  vault.yaml, secrets-store-csi.yaml and vaultsync.yaml rendered (SECRETS_BACKEND=vault, UI=$VAULT_UI)"
+  fi
   if [ -n "${CUSTOM_VALUES_YAML//[[:space:]]/}" ]; then printf '%s\n' "$CUSTOM_VALUES_YAML" > "$OUT/custom.yaml"; echo "  custom values from config.env CUSTOM_VALUES_YAML applied"; else echo '{}' > "$OUT/custom.yaml"; fi
   if [ "$EXPOSE" = clusterip ]; then cp "$ROOT/values/expose-clusterip.umbrella.yaml" "$OUT/lb-umbrella.yaml"; cp "$ROOT/values/expose-clusterip.nginx.yaml" "$OUT/lb-nginx.yaml"
   elif [ "${LB_INTERNAL:-no}" = yes ]; then cp "$ROOT/values/lb-internal.umbrella.yaml" "$OUT/lb-umbrella.yaml"; cp "$ROOT/values/lb-internal.nginx.yaml" "$OUT/lb-nginx.yaml"
@@ -149,7 +173,8 @@ phase_render(){
 
 phase_ns(){
   log "namespaces, pull secrets, TLS"
-  for ns in postgres "$NAMESPACE" openmeter envoy-gateway-system envoy-ai-gateway-system nginx-ingress; do
+  local NSLIST="postgres $NAMESPACE openmeter envoy-gateway-system envoy-ai-gateway-system nginx-ingress"; [ "$STORAGE_BACKEND" = hpe-x10000 ] && NSLIST="$NSLIST hpe-storage"; [ "$SECRETS_BACKEND" = vault ] && NSLIST="$NSLIST $VAULT_NAMESPACE"
+  for ns in $NSLIST; do
     kubectl create ns "$ns" --dry-run=client -o yaml | kc apply -f - >/dev/null
     kubectl -n "$ns" create secret docker-registry registry-pull --docker-server="$REGISTRY" \
       --docker-username="${REGISTRY_USER:-anonymous}" --docker-password="${REGISTRY_PASS:-anonymous}" --dry-run=client -o yaml | kc apply -f - >/dev/null
@@ -203,6 +228,102 @@ YAML
   echo "  jar URL for Keycloak: $KEYCLOAK_JAR_URL"
 }
 
+phase_storage(){
+  if [ "$STORAGE_BACKEND" != hpe-x10000 ]; then log "storage: STORAGE_BACKEND=$STORAGE_BACKEND - nothing to install"; return 0; fi
+  log "HPE CSI Driver 3.2.0 (X10000 NFS) + StorageClass $STORAGE_CLASS"
+  helm upgrade --install hpe-csi "$C/hpe-csi-driver-3.2.0.tgz" -n hpe-storage -f "$OUT/hpe-csi.yaml" --wait --timeout 10m
+  if [ $DRY = 1 ]; then echo "  [dry-run] would create Secret hpe-backend and StorageClass $STORAGE_CLASS"; return 0; fi
+  : "${X10000_CLIENT_SECRET:?run first: read -rs X10000_CLIENT_SECRET; export X10000_CLIENT_SECRET   (the CSP client secret from the X10000 admin)}"
+  local be="$X10000_MGMT"; case "$be" in *:*) ;; *) be="$be:443";; esac
+  kubectl -n hpe-storage create secret generic hpe-backend --from-literal=serviceName=alletrastoragemp-x10000-nfs-csp-svc --from-literal=servicePort=8080 \
+    --from-literal=backend="$be" --from-literal=username="$X10000_CLIENT_ID" --from-literal=password="$X10000_CLIENT_SECRET" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  echo "  Secret hpe-backend applied (backend $be)"
+  kubectl apply -f "$OUT/storageclass-hpe-x10000.yaml" >/dev/null && echo "  StorageClass $STORAGE_CLASS applied"
+  wait_for "HPE CSI controller Available" 300 kubectl -n hpe-storage rollout status deploy/hpe-csi-controller --timeout=10s
+  wait_for "X10000 NFS CSP Available" 300 kubectl -n hpe-storage rollout status deploy/alletrastoragemp-x10000-nfs-csp --timeout=10s
+  kubectl get sc "$STORAGE_CLASS"
+}
+
+# ---- Vault helpers: commands run INSIDE vault-0; the root token travels on stdin (never on a command line) ----
+vtok(){ python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["root_token"])' "$VAULT_INIT_FILE"; }
+vexec(){ { vtok; printf '%s\n' "$1"; } | kubectl -n "$VAULT_NAMESPACE" exec -i vault-0 -- sh -c 'IFS= read -r VAULT_TOKEN; export VAULT_TOKEN VAULT_ADDR=http://127.0.0.1:8200; sh -s'; }
+vstatus(){ kubectl -n "$VAULT_NAMESPACE" exec vault-0 -- sh -c 'VAULT_ADDR=http://127.0.0.1:8200 vault status -format=json' 2>/dev/null | python3 -c 'import sys,json;d=json.load(sys.stdin);print(("init=%s sealed=%s")%(str(d.get("initialized")).lower(),str(d.get("sealed")).lower()))' 2>/dev/null || echo "init=unknown sealed=unknown"; }
+
+phase_vault(){
+  if [ "$SECRETS_BACKEND" != vault ]; then log "vault: SECRETS_BACKEND=$SECRETS_BACKEND - nothing to install"; return 0; fi
+  log "Secrets Store CSI driver + dedicated HashiCorp Vault (namespace $VAULT_NAMESPACE)"
+  helm upgrade --install csi-secrets-store "$C/secrets-store-csi-driver-1.5.6.tgz" -n kube-system -f "$OUT/secrets-store-csi.yaml" --wait --timeout 10m
+  helm upgrade --install vault "$C/vault-0.32.0.tgz" -n "$VAULT_NAMESPACE" -f "$OUT/vault.yaml" --timeout 10m
+  [ $DRY = 1 ] && { echo "  [dry-run] would initialize, unseal and configure Vault"; return 0; }
+  wait_for "vault-0 pod Running" 600 bash -c "[ \"\$(kubectl -n $VAULT_NAMESPACE get pod vault-0 -o jsonpath='{.status.phase}' 2>/dev/null)\" = Running ]"
+  wait_for "vault server answering" 180 bash -c "kubectl -n $VAULT_NAMESPACE exec vault-0 -- sh -c 'VAULT_ADDR=http://127.0.0.1:8200 vault status' 2>&1 | grep -q 'Initialized'"
+  local st; st=$(vstatus); echo "  vault: $st"
+  case "$st" in
+    *init=false*)
+      [ ! -s "$VAULT_INIT_FILE" ] || die "Vault is not initialized but $VAULT_INIT_FILE already exists: move it away (stale file)"
+      ( umask 077; kubectl -n "$VAULT_NAMESPACE" exec vault-0 -- sh -c 'VAULT_ADDR=http://127.0.0.1:8200 vault operator init -key-shares=5 -key-threshold=3 -format=json' > "$VAULT_INIT_FILE" )
+      python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));assert len(d["unseal_keys_b64"])==5 and d["root_token"]' "$VAULT_INIT_FILE" || die "vault operator init failed (see $VAULT_INIT_FILE)"
+      echo "  initialized: 5 unseal keys (3 needed) and the root token are in $VAULT_INIT_FILE (0600) - COPY IT TO A SAFE OFFLINE PLACE NOW"; st=$(vstatus);;
+    *init=true*) [ -s "$VAULT_INIT_FILE" ] || die "Vault is initialized but $VAULT_INIT_FILE is missing: restore the init file from your backup (without the unseal keys Vault cannot be opened)";;
+    *) die "cannot read the Vault status";;
+  esac
+  case "$st" in *sealed=true*)
+    local i k; for i in 0 1 2; do
+      k=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["unseal_keys_b64"][int(sys.argv[2])])' "$VAULT_INIT_FILE" "$i")
+      printf '%s\n' "$k" | kubectl -n "$VAULT_NAMESPACE" exec -i vault-0 -- sh -c 'IFS= read -r K; VAULT_ADDR=http://127.0.0.1:8200 vault operator unseal "$K"' >/dev/null
+    done; echo "  vault: $(vstatus)";; esac
+  case "$(vstatus)" in *sealed=false*) ;; *) die "Vault is still sealed";; esac
+  vexec 'vault secrets list -format=json | grep -q "\"secret/\"" || vault secrets enable -path=secret kv-v2
+vault auth list -format=json | grep -q "\"kubernetes/\"" || vault auth enable kubernetes
+vault write auth/kubernetes/config kubernetes_host="https://kubernetes.default.svc:443" >/dev/null
+vault policy write tokenfactory - <<"POLICY"
+path "secret/data/tokenfactory" { capabilities = ["read"] }
+path "secret/metadata/tokenfactory" { capabilities = ["read", "list"] }
+POLICY
+vault write auth/kubernetes/role/tokenfactory bound_service_account_names=tf-vault-sync bound_service_account_namespaces='"$NAMESPACE"' policies=tokenfactory ttl=1h >/dev/null
+echo configured' | tail -1
+  echo "  Vault ready: KV v2 at secret/, Kubernetes auth, policy + role 'tokenfactory' (ServiceAccount tf-vault-sync in $NAMESPACE)"
+  if [ "$VAULT_UI" = true ]; then
+    kubectl -n "$VAULT_NAMESPACE" create secret tls "$INGRESS_TLS_SECRET" --cert="$TLS_CERT" --key="$TLS_KEY" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    kubectl apply -f "$OUT/vault-ingress.yaml" >/dev/null
+    echo "  Vault UI: https://$VAULT_HOST  (allowed networks: $VAULT_UI_ALLOW; create DNS $VAULT_HOST -> the ingress controller IP)"
+  fi
+  kubectl -n "$VAULT_NAMESPACE" get pods
+}
+
+secrets_vault(){
+  log "tokenfactory secrets -> Vault (secret/tokenfactory) + service keys"
+  kubectl -n "$NAMESPACE" create serviceaccount tf-vault-sync --dry-run=client -o yaml | kubectl apply -f - >/dev/null; echo "  ServiceAccount tf-vault-sync: ready"
+  if vexec 'vault kv get -mount=secret tokenfactory >/dev/null 2>&1 && echo EXISTS' | grep -q EXISTS; then
+    [ -f "$KEYFILE" ] || die "Vault already holds secret/tokenfactory but $KEYFILE is missing (service keys must stay stable) - restore it from backup"
+    echo "  secret/tokenfactory exists in Vault - keeping it (service keys: $KEYFILE)"; return 0; fi
+  [ ! -e "$KEYFILE" ] || die "$KEYFILE exists but Vault has no secret/tokenfactory - remove the stale file or restore the Vault data"
+  local json; json=$(SMTP_PASSWORD="${SMTP_PASSWORD:-}" python3 - <<'PY'
+import json, os, secrets, base64
+g=lambda: secrets.token_hex(32)
+pw=lambda: "Aa1!"+secrets.token_hex(12)
+jwt=g()
+d={"db-password":g(),"jwt-secret":jwt,"portal-jwt-secret":jwt,"admin-api-key":g(),
+   "encryption-key":base64.b64encode(secrets.token_bytes(32)).decode(),
+   "ce-userinfo-signing-key":g(),"auth-state-signing-key":g(),
+   "kc-admin-username":"admin","kc-admin-password":pw(),"kc-db-username":"keycloak","kc-db-password":g(),
+   "openfga-db-password":g(),"s3-access-key":secrets.token_hex(10),"s3-secret-key":g(),
+   "stripe-webhook-secret":"","stripe-secret-key":"","smtp-password":os.environ.get("SMTP_PASSWORD",""),
+   "platform-admin-password":pw(),"platform-init-admin-password":pw()}
+print(json.dumps(d))
+PY
+)
+  vexec "vault kv put -mount=secret tokenfactory - <<'__JSON__'
+$json
+__JSON__
+echo stored" | grep -q stored || die "could not write secret/tokenfactory to Vault"
+  json=""
+  local g; g(){ openssl rand -hex 32; }
+  umask 077; { for k in ACCOUNTS LEDGER CONTROL RELAY WARDEN; do echo "SERVICE_KEY_TF_$k=$(g)"; done; } > "$KEYFILE"
+  echo "  19 keys written to Vault secret/tokenfactory. Service keys saved to $KEYFILE (0600) - BACK IT UP, every upgrade needs the same values."
+  echo "  The Secret tokenfactory-secrets appears in $NAMESPACE when the app is installed (the chart's vault-secret-syncer mounts it through the CSI driver)."
+}
+
 phase_pg(){
   log "Postgres HA (Zalando) - mode: $PG_OPERATOR_MODE"
   if [ "$PG_OPERATOR_MODE" = install ]; then
@@ -220,6 +341,7 @@ phase_pg(){
 }
 
 phase_secrets(){
+  if [ "$SECRETS_BACKEND" = vault ]; then secrets_vault; return; fi
   log "tokenfactory-secrets + service keys"
   if kubectl -n "$NAMESPACE" get secret tokenfactory-secrets >/dev/null 2>&1; then
     [ -f "$KEYFILE" ] || die "tokenfactory-secrets exists but $KEYFILE is missing (service keys must stay stable) - restore it from backup"
@@ -300,10 +422,12 @@ phase_app(){
   # (openmeter-api-restrict, enforced by Cilium) admits ONLY tf-ledger, so that probe can never succeed on a policy-enforcing cluster.
   for crd in gateways.gateway.networking.k8s.io aigatewayroutes.aigateway.envoyproxy.io envoyproxies.gateway.envoyproxy.io; do kubectl get crd "$crd" >/dev/null 2>&1 || die "CRD $crd missing - run phase controllers"; done
   [ "$(kubectl -n openmeter get deploy openmeter-api -o jsonpath='{.status.availableReplicas}' 2>/dev/null)" -ge 1 ] 2>/dev/null || die "OpenMeter API is not ready - run phase openmeter"
-  kubectl -n "$NAMESPACE" get secret tokenfactory-secrets tf-etisalat-tls >/dev/null || die "tokenfactory-secrets / tf-etisalat-tls missing in $NAMESPACE"
+  if [ "$SECRETS_BACKEND" = vault ]; then kubectl -n "$NAMESPACE" get secret tf-etisalat-ingress-tls >/dev/null 2>&1 || kubectl -n "$NAMESPACE" get secret "$INGRESS_TLS_SECRET" >/dev/null || die "TLS Secret $INGRESS_TLS_SECRET missing in $NAMESPACE"; kubectl -n "$NAMESPACE" get sa tf-vault-sync >/dev/null || die "ServiceAccount tf-vault-sync missing in $NAMESPACE (run phase secrets)"
+  else kubectl -n "$NAMESPACE" get secret tokenfactory-secrets >/dev/null || die "tokenfactory-secrets missing in $NAMESPACE"; fi
+  if [ "$BEHIND_CLOUDFLARE" != yes ]; then kubectl -n "$NAMESPACE" get secret tf-etisalat-tls >/dev/null || die "tf-etisalat-tls missing in $NAMESPACE"; fi
   echo "  pre-install checks ok (CRDs, OpenMeter API, secrets)"
   SKIP_PREFLIGHT=1 CHART_DIR="$REPO/helm/tokenfactory" RELEASE=tokenfactory NAMESPACE="$NAMESPACE" VALUES="$REPO/helm/tokenfactory/values-tf-etisalat.yaml" \
-    HELM_ARGS="-f $OUT/umbrella.yaml -f $OUT/services.yaml -f $OUT/lb-umbrella.yaml -f $OUT/lb-envoyip.yaml -f $OUT/edge.yaml -f $OUT/tlsmode.yaml -f $OUT/custom.yaml -f $OUT/service-keys.yaml --timeout 30m" \
+    HELM_ARGS="-f $OUT/umbrella.yaml -f $OUT/services.yaml -f $OUT/vaultsync.yaml -f $OUT/lb-umbrella.yaml -f $OUT/lb-envoyip.yaml -f $OUT/edge.yaml -f $OUT/tlsmode.yaml -f $OUT/custom.yaml -f $OUT/service-keys.yaml --timeout 30m" \
     "$REPO/helm/setup/scripts/install.sh"
 }
 
@@ -314,6 +438,7 @@ phase_verify(){
   echo "-- pods not Ready:"; kubectl get pods -A --no-headers | grep -vE 'Running|Completed' | grep -E "$NAMESPACE|openmeter|envoy|nginx-ingress|postgres" || echo "  none"
   echo "-- images NOT from $REGISTRY (expect none):"
   kubectl get pods -A -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.image}{"\n"}{end}{range .spec.initContainers[*]}{.image}{"\n"}{end}{end}' | sort -u | grep -vE "^$REGISTRY/|^registry.k8s.io/pause|^$" | grep -vE "kube-|calico|flannel|cilium|coredns|etcd|csi|metrics-server" || echo "  none"
+  if [ "$SECRETS_BACKEND" = vault ]; then echo "-- vault: $(vstatus)"; kubectl -n "$NAMESPACE" get secret tokenfactory-secrets >/dev/null 2>&1 && echo "   Secret tokenfactory-secrets synced from Vault: $(kubectl -n "$NAMESPACE" get secret tokenfactory-secrets -o json | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["data"]))') keys" || echo "   WARNING: Secret tokenfactory-secrets not present yet (kubectl -n $NAMESPACE get pods -l app=vault-secret-syncer)"; fi
   echo "-- keycloak HA:"; kubectl -n "$NAMESPACE" get sts keycloak; kubectl -n "$NAMESPACE" get pdb | grep -i keycloak || true
   echo "-- ingress:"; kubectl -n "$NAMESPACE" get ingress tokenfactory
   local ING_SVC ING_IP
@@ -348,7 +473,9 @@ phase_dryrun(){
   T nginx-ingress "$C/nginx-ingress-1.3.2.tgz" -n nginx-ingress -f "$OUT/nginx-ingress.yaml" -f "$OUT/lb-nginx.yaml"
   T openmeter "$REPO/helm/infrastructure/openmeter" -n openmeter -f "$OUT/openmeter.yaml" --set openmeter.clickhouseCredentials.existingSecretName=om-clickhouse-pw --set openmeter.config.postgres.url=x --set openmeter.svix.database.dsn=x
   write_service_keys dryrun dryrun dryrun dryrun dryrun
-  T tokenfactory "$REPO/helm/tokenfactory" -n "$NAMESPACE" -f "$REPO/helm/tokenfactory/values-tf-etisalat.yaml" -f "$OUT/umbrella.yaml" -f "$OUT/services.yaml" -f "$OUT/lb-umbrella.yaml" -f "$OUT/lb-envoyip.yaml" -f "$OUT/edge.yaml" -f "$OUT/tlsmode.yaml" -f "$OUT/custom.yaml" -f "$OUT/service-keys.yaml" \
+  [ "$SECRETS_BACKEND" = vault ] && { T csi-secrets-store "$C/secrets-store-csi-driver-1.5.6.tgz" -n kube-system -f "$OUT/secrets-store-csi.yaml"; T vault "$C/vault-0.32.0.tgz" -n "$VAULT_NAMESPACE" -f "$OUT/vault.yaml"; }
+  [ "$STORAGE_BACKEND" = hpe-x10000 ] && { T hpe-csi "$C/hpe-csi-driver-3.2.0.tgz" -n hpe-storage -f "$OUT/hpe-csi.yaml"; grep -q "provisioner: csi.hpe.com" "$OUT/storageclass-hpe-x10000.yaml" && grep -q "vers=4.1" "$OUT/storageclass-hpe-x10000.yaml" && echo "  ok: StorageClass manifest"; }
+  T tokenfactory "$REPO/helm/tokenfactory" -n "$NAMESPACE" -f "$REPO/helm/tokenfactory/values-tf-etisalat.yaml" -f "$OUT/umbrella.yaml" -f "$OUT/services.yaml" -f "$OUT/vaultsync.yaml" -f "$OUT/lb-umbrella.yaml" -f "$OUT/lb-envoyip.yaml" -f "$OUT/edge.yaml" -f "$OUT/tlsmode.yaml" -f "$OUT/custom.yaml" -f "$OUT/service-keys.yaml" \
     --set-file keycloak.theme.archive="$REPO/brands/etisalat/keycloak/theme.tar.gz.b64"
   log "dry-run PASSED - safe to run: ./deploy-all.sh all"
 }

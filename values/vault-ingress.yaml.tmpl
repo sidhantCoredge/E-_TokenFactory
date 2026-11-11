@@ -1,0 +1,25 @@
+# Ingress for the Vault UI/API of THIS cluster, served by the cluster's Ingress-NGINX (172.22.100.241), with TLS and a source-IP allowlist. Placeholders come from config.env.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vault
+  namespace: ${VAULT_NAMESPACE}
+  annotations:
+    # community ingress-nginx (the controller on 172.22.100.241): only these networks may reach Vault
+    nginx.ingress.kubernetes.io/whitelist-source-range: "${VAULT_UI_ALLOW}"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    # F5 NGINX controller equivalents of the timeouts (it has no allowlist annotation: restrict with a Policy or NetworkPolicy there)
+    nginx.org/proxy-read-timeout: 120s
+spec:
+  ingressClassName: ${INGRESS_CLASS}
+  tls:
+    - hosts: [ "${VAULT_HOST}" ]
+      secretName: ${INGRESS_TLS_SECRET}
+  rules:
+    - host: "${VAULT_HOST}"
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: vault, port: { number: 8200 } }
