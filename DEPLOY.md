@@ -22,6 +22,24 @@ Lab note: a 1-node cluster cannot hold 3 Postgres instances, so the lab uses `SI
 ## PART A — [MAC] build the bundle (needs internet)
 This git repo holds scripts, values and docs only. Two things are **not** in git (private or huge) and are created here, git-ignored: `ai-gateway-platform/` (the chart checkout, pinned to one commit) and `bundle/` (image tars, charts, CRDs, Keycloak jar, linux `helm`/`kubectl`). Both are copied to the install VM in A6.
 
+**Where to run Part A.** Everything in Part A runs **on your Mac, in a terminal, from the package root**: the folder that contains `config.env`, `airgap/`, `values/` and `DEPLOY.md` (the folder you cloned from GitHub, for example `~/Downloads/E-_TokenFactory`; on the author's Mac it is `~/Downloads/E-_TokenFactory-upload`). Do **not** `cd` into `airgap/`, and never run `airgap/env.sh` on its own: it only loads the settings for the other scripts. The Mac's default shell (zsh) is fine; every script starts with its own `bash`.
+
+**A0. Do you already have the bundle? Check each line first.** The bundle (`bundle/`, about 5.8 GB) and the chart checkout (`ai-gateway-platform/`) are **not in GitHub**: they are built on your Mac and stay in the package folder (git-ignored). If all seven checks are fine, skip to Part B. If any check fails, do the steps named in the last column (they are A1 - A5 below), then run the seven checks again.
+```
+cd ~/Downloads/E-_TokenFactory
+pwd
+```
+| # | Check (run it) | You must see | If not: create it with |
+|---|---|---|---|
+| 1 | `ls config.env airgap values zalando` | the four names, no error | you are in the wrong folder: `cd` to the folder where you cloned the repository |
+| 2 | `grep -E '^export (TF_TAG\|CHART_REF)=' config.env \| cut -c1-70` | `TF_TAG="0.17.7-73caf32"` and `CHART_REF="58577e2d2bd5b051745e741aa48a882462360e4d"` | the settings are old: `git pull`, then do A3 - A5 |
+| 3 | `git -C ai-gateway-platform rev-parse HEAD` | `58577e2d2bd5b051745e741aa48a882462360e4d` | missing or another commit: **A1, A2, A3** (then A5, to re-vendor the chart dependencies) |
+| 4 | `ls bundle/tars/*.tar \| wc -l` | `56` | fewer, or no `bundle/`: **A1, A2, A5** |
+| 5 | `wc -l < bundle/tars/INDEX` | `56` | same as 4 |
+| 6 | `ls bundle/charts` | 7 files: `ai-gateway-crds-helm-v1.0.0.tgz ai-gateway-helm-v1.0.0.tgz gateway-helm-v1.8.1.tgz hpe-csi-driver-3.2.0.tgz nginx-ingress-1.3.2.tgz secrets-store-csi-driver-1.5.6.tgz vault-0.32.0.tgz` | one is missing: **A5** |
+| 7 | `ls bundle/jars bundle/tools` | the Keycloak jar `keycloak-2fa-email-authenticator-26.6.1-KC26.8.0.jar`, and `helm kubectl` | **A5** |
+Order when you must create things: **A1 (tools) -> A2 (logins) -> A3 (chart checkout) -> A4 (tag check) -> A5 (bundle)**. Do not run A3 while A5 is running (A3 replaces the checkout that A5 uses).
+
 **A1. Tools**
 ```
 brew install skopeo crane helm git
@@ -33,20 +51,21 @@ skopeo login ghcr.io -u <your-github-username>
 ```
 **A3. Fetch the chart checkout** (pinned: `CHART_REPO` / `CHART_REF` in `config.env` = branch `stage`, chart 0.17.7). It also refuses a `TF_TAG` that does not start with the chart version
 ```
-cd <this package folder>
+cd ~/Downloads/E-_TokenFactory
 airgap/00-fetch-chart.sh                  # ends with: ok: chart checkout complete
 ```
-**A4. Check the two image tags exist** (nothing to edit unless you move to a newer release: then change `TF_TAG`, `BRAND_TAG` and `CHART_REF` together in `config.env`)
+**A4. Check the two image tags exist** (nothing to edit unless you move to a newer release: then change `TF_TAG`, `BRAND_TAG` and `CHART_REF` together in `config.env`). The check needs the settings loaded in the same command, so it runs inside `bash -c`:
 ```
-. airgap/env.sh
-skopeo inspect --no-tags docker://ghcr.io/infinia-technology/ai-gateway-platform/tf-accounts:$TF_TAG >/dev/null && echo "TF_TAG ok"
-skopeo inspect --no-tags docker://ghcr.io/infinia-technology/ai-gateway-platform/tf-portal-web:$BRAND_TAG >/dev/null && echo "BRAND_TAG ok"
+cd ~/Downloads/E-_TokenFactory
+bash -c '. airgap/env.sh; echo "TF_TAG=$TF_TAG BRAND_TAG=$BRAND_TAG"; skopeo inspect --no-tags docker://ghcr.io/infinia-technology/ai-gateway-platform/tf-accounts:$TF_TAG >/dev/null && echo "TF_TAG ok"; skopeo inspect --no-tags docker://ghcr.io/infinia-technology/ai-gateway-platform/tf-portal-web:$BRAND_TAG >/dev/null && echo "BRAND_TAG ok"'
 ```
+It must print the two tags, then `TF_TAG ok` and `BRAND_TAG ok`. (`invalid reference format` with an empty tag means the settings were not loaded: run the command exactly as written, from the package root.) `unauthorized` means `skopeo login ghcr.io` (A2) is missing or the token cannot read `infinia-technology` packages.
 **A5. Build the bundle** (≈ 5 GB, 20–60 min, safe to re-run if it stops: finished images are skipped)
 ```
+cd ~/Downloads/E-_TokenFactory
 airgap/01-bundle-connected.sh
 ```
-It ends with `== done. total size:` and `image tars: 56 of 56`. Anything listed as `FAILED images` is a real error: fix it and re-run (finished images are skipped). Every image the chart renders is in `airgap/images.txt` (checked by rendering all releases with `helm template`).
+It ends with `== done. total size:`, `image tars: 56 of 56` and `bundle COMPLETE`. If A3 just fetched a new chart commit, run A5 again: it re-vendors the chart dependencies (finished image tars are skipped). Anything listed as `FAILED images` is a real error: fix it and re-run (finished images are skipped). Every image the chart renders is in `airgap/images.txt` (checked by rendering all releases with `helm template`).
 Result: `bundle/tars/*.tar`, `bundle/charts`, `bundle/crds`, `bundle/jars` (the Keycloak plugin jar, see B4), `bundle/tools/helm` and `bundle/tools/kubectl` (Linux binaries for the air-gap side).
 
 **A6. Copy everything to the install VM** (resumable; the folder includes the git-ignored `ai-gateway-platform/` and `bundle/`). First time as written; when you copy again later add `--exclude config.env` so your filled-in file on the VM is not overwritten

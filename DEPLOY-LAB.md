@@ -14,19 +14,42 @@ Every command below is meant to be copied as written. Lines starting with `#` ar
 
 ---
 ## PART 1 — On your Mac (needs the VPN to the jumphost)
-The bundle and the chart checkout are already built in `~/Downloads/E-_TokenFactory-upload` (git-ignored folders `bundle/` and `ai-gateway-platform/`). Check them:
-```
-cd ~/Downloads/E-_TokenFactory-upload
-git status --short                                           # nothing (everything committed)
-ls bundle/tars/*.tar | wc -l                                 # must print 56
-ls bundle/charts                                             # hpe-csi-driver, secrets-store-csi-driver, vault, gateway-helm, ai-gateway-*, nginx-ingress ...
-ls ai-gateway-platform/helm/tokenfactory/Chart.yaml
-```
-If a number or file is missing, rebuild (needs internet): `airgap/00-fetch-chart.sh && airgap/01-bundle-connected.sh` (DEPLOY.md Part A).
+All commands of this part run **on your Mac, in a terminal, from the package root** (the folder that contains `config.env`, `airgap/`, `values/`; below it is `~/Downloads/E-_TokenFactory`, on the author's Mac `~/Downloads/E-_TokenFactory-upload`). Do not `cd` into `airgap/`.
 
-Copy the package to the jumphost (≈ 6 GB; unchanged files are skipped, old tars that are no longer used are removed; the jumphost has ~16 GB free):
+### 1.1 Do you already have the bundle? Check each line
+The bundle (`bundle/`, 5.8 GB) and the chart checkout (`ai-gateway-platform/`) are **not in GitHub**: they are built on your Mac and stay in the package folder (git-ignored).
 ```
-rsync -avP --delete --exclude .git --exclude Real-values-of-tf-prod.yaml -e "ssh -i ~/.ssh/id_rsa_jumphost" ~/Downloads/E-_TokenFactory-upload/ azureuser@10.40.1.4:~/etisalat/
+cd ~/Downloads/E-_TokenFactory
+pwd
+```
+| # | Check (run it) | You must see | If not: what to do |
+|---|---|---|---|
+| 1 | `ls config.env airgap values zalando` | the four names, no error | you are in the wrong folder: `cd` to the folder where you cloned the repository |
+| 2 | `git -C ai-gateway-platform rev-parse HEAD` | `58577e2d2bd5b051745e741aa48a882462360e4d` | missing or another commit: **create the checkout** (box A below) |
+| 3 | `ls bundle/tars/*.tar \| wc -l` | `56` | fewer or no `bundle/`: **create the bundle** (box A below) |
+| 4 | `wc -l < bundle/tars/INDEX` | `56` | same as 3 |
+| 5 | `ls bundle/charts` | 7 files: `ai-gateway-crds-helm-v1.0.0.tgz ai-gateway-helm-v1.0.0.tgz gateway-helm-v1.8.1.tgz hpe-csi-driver-3.2.0.tgz nginx-ingress-1.3.2.tgz secrets-store-csi-driver-1.5.6.tgz vault-0.32.0.tgz` | one is missing: **create the bundle** (box A) |
+| 6 | `ls bundle/jars bundle/tools` | the Keycloak jar `...26.6.1-KC26.8.0.jar`, and `helm kubectl` | **create the bundle** (box A) |
+| 7 | `grep -E '^export (TF_TAG\|CHART_REF)=' config.env \| cut -c1-70` | `TF_TAG="0.17.7-73caf32"` and the `CHART_REF` above | the tag/commit in `config.env` is old: `git pull` (or edit the two lines), then box A |
+If **all seven** are fine, go to 1.3. If any one is not, do box A first.
+
+### 1.2 Box A: create the checkout and the bundle (only if a check above failed; needs internet)
+```
+cd ~/Downloads/E-_TokenFactory
+brew install skopeo crane helm git                         # once per Mac
+skopeo login docker.io                                     # Docker Hub account
+skopeo login ghcr.io -u <your-github-username>             # password = a GitHub token with read:packages on Infinia-Technology
+airgap/00-fetch-chart.sh                                   # ends with: ok: chart checkout complete   (needs your git access to Infinia-Technology/ai-gateway-platform)
+bash -c '. airgap/env.sh; echo "TF_TAG=$TF_TAG BRAND_TAG=$BRAND_TAG"; skopeo inspect --no-tags docker://ghcr.io/infinia-technology/ai-gateway-platform/tf-accounts:$TF_TAG >/dev/null && echo "TF_TAG ok"; skopeo inspect --no-tags docker://ghcr.io/infinia-technology/ai-gateway-platform/tf-portal-web:$BRAND_TAG >/dev/null && echo "BRAND_TAG ok"'
+airgap/01-bundle-connected.sh                              # 20-60 min; safe to run again if it stops (finished images are skipped)
+```
+The last script must end with `image tars: 56 of 56` and `bundle COMPLETE`. Anything listed as `FAILED images` is a real error: fix it and run the script again. If the chart checkout was changed (`00-fetch-chart.sh` fetched a new commit), run `airgap/01-bundle-connected.sh` again afterwards: it re-vendors the chart dependencies. **Do not run `00-fetch-chart.sh` while `01-bundle-connected.sh` is running** (it replaces the checkout the other script is using).
+Then run the seven checks of 1.1 again.
+
+### 1.3 Copy the package to the jumphost
+This copies the whole package folder, including the git-ignored `bundle/` and `ai-gateway-platform/` (≈ 6 GB; unchanged files are skipped, old tars that are no longer used are removed; the jumphost has ~16 GB free). Use the folder you checked in 1.1 as the source:
+```
+rsync -avP --delete --exclude .git --exclude Real-values-of-tf-prod.yaml -e "ssh -i ~/.ssh/id_rsa_jumphost" ~/Downloads/E-_TokenFactory/ azureuser@10.40.1.4:~/etisalat/
 ```
 It must end without errors. Then log in:
 ```
@@ -48,23 +71,21 @@ kubectl get sc                                                # the class "defau
 ```
 If `kubectl get nodes` fails: `az aks get-credentials -g rg-tokenfactory -n aks-etisalat-test --admin --file ~/etisalat.kubeconfig --overwrite-existing`.
 
-### 2.2 Reset the lab (the OLD test deployment of 5 Nov is still there)
-The old stack runs in namespace `tokenfactory-etisalat` (chart 0.17.2). Remove it so this run starts clean. **This deletes the lab's test data only.**
+### 2.2 Reset the lab (only if the lab is not clean)
+Check first (it is clean when only the `default` and `kube-*` namespaces exist and there are no pods outside `kube-system`):
 ```
 export KUBECONFIG=~/etisalat.kubeconfig
-helm -n tokenfactory-etisalat uninstall tokenfactory || true
-helm -n tokenfactory-etisalat uninstall pgdb || true
-helm -n openmeter uninstall openmeter || true
-helm -n nginx-ingress uninstall nginx-ingress || true
-helm -n postgres uninstall postgres-operator || true
-helm -n envoy-ai-gateway-system uninstall aieg || true
-helm -n envoy-ai-gateway-system uninstall aieg-crds || true
-helm -n envoy-gateway-system uninstall eg || true
-kubectl delete ns tokenfactory-etisalat openmeter nginx-ingress postgres envoy-ai-gateway-system envoy-gateway-system --wait=true --timeout=15m --ignore-not-found
-rm -f ~/.etisalat-service-keys.env ~/.etisalat-vault-init.json
-kubectl get ns                                                # only default kube-* namespaces are left
-kubectl get pv                                                # empty (or wait a minute: the disks are being deleted)
+kubectl get ns
+kubectl get pods -A | grep -v kube-system
+kubectl get pv
 ```
+Clean (nothing listed except the four system namespaces): skip to 2.3. Otherwise run the reset script that came with the package. It refuses to run unless the cluster is the lab (exactly one node `aks-sys1-*`), and it removes only the objects of this stack (namespaces and their volumes, the CRDs and cluster roles of the stack, the cached images, and the Etisalat files in the home directory; never the AKS add-ons or any Xailon file):
+```
+cd ~/etisalat
+airgap/lab-reset.sh --dry-run --images     # shows what would be removed, changes nothing
+airgap/lab-reset.sh --images               # asks you to type RESET-LAB, then resets (5-15 min)
+```
+It ends with `LAB CLEAN`. Run it again if it says `NOT clean` (a namespace can need a minute to terminate).
 
 ### 2.3 TLS certificate (self-signed wildcard for the lab)
 ```
