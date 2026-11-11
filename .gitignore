@@ -1,5 +1,6 @@
 # secrets / site-specific
 Real-values-of-tf-prod.yaml
+secrets.local.env
 *.local.yaml
 # generated or fetched on the Mac (never committed): the image/chart bundle, the private chart checkout, rendered values
 bundle/

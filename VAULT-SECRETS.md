@@ -51,6 +51,22 @@ What you must do around it:
 Turn it off again: `VAULT_UI="false"`, then `airgap/deploy-all.sh render vault` and `kubectl -n vault delete ingress vault`.
 Security: Vault holds every TokenFactory secret. Keep `VAULT_UI_ALLOW` to the admin networks only, use TLS, do not share the root token, and prefer `VAULT_UI="false"` when the UI is not needed.
 
+## 2c. Your own values for some secrets (optional): `secrets.local.env`
+The 30 secrets are **not** in `config.env` (it is committed to git). By default the `secrets` phase generates them randomly; nothing needs to be typed. Most of them are internal keys that nobody ever types (`db-password`, `jwt-secret`, `encryption-key`, ...). The only values you normally supply from outside:
+| Secret | Where it comes from |
+|---|---|
+| `smtp-password` (the Resend API key) | `SMTP_PASSWORD` in `config.env`, or `secrets.local.env` |
+| the admin passwords (`kc-admin-password`, `platform-admin-password`, `platform-init-admin-password`) | random by default (read them with the command in `DEPLOY.md` B8); set your own in `secrets.local.env` if you want to choose them |
+| `stripe-webhook-secret`, `stripe-secret-key` | empty on purpose (Stripe is off in this deployment) |
+To choose values, **before the first run of the `secrets` phase** copy the example file and keep only the lines you want (the file is git-ignored; never commit it):
+```
+cd ~/Downloads/E-_TokenFactory
+cp secrets.local.env.example secrets.local.env
+nano secrets.local.env            # e.g.:  smtp-password=...   and   platform-admin-password=Etisalat#2026x
+```
+Format: `KEY=VALUE`, one per line. Only the 30 keys are accepted (a typo is an error, not ignored); the admin passwords must have at least 8 characters with upper case, lower case, a digit and a special character; `encryption-key` must be base64 of 32 bytes and **can never be rotated afterwards**, so leave it random unless you must. Copy `secrets.local.env` to the install VM together with the package (it is excluded from git, not from rsync) or create it there. The `secrets` phase prints `overrides from ...: <key names>` (never the values).
+This is used **only when `secret/tokenfactory` does not exist yet** (first run). To change a value afterwards, use section 4 (`vault kv patch`), wait about 2 minutes, then restart the services that use it.
+
 ## 3. Important operating facts
 1. **Vault starts SEALED after every restart** (pod restart, node reboot, upgrade). There is no cloud key to open it automatically in an air-gap. Unseal it with the init file:
    ```
@@ -69,7 +85,7 @@ Security: Vault holds every TokenFactory secret. Keep `VAULT_UI_ALLOW` to the ad
 | Check status | `kubectl -n vault get pods` (vault-0 and the vault-csi-provider pods Running); `kubectl -n vault exec vault-0 -- vault status` |
 | List the secret **names** (no values) | `TOKEN=$(python3 -c 'import json;print(json.load(open("'$HOME'/.etisalat-vault-init.json"))["root_token"])'); printf '%s\n' "$TOKEN" \| kubectl -n vault exec -i vault-0 -- sh -c 'IFS= read -r VAULT_TOKEN; export VAULT_TOKEN VAULT_ADDR=http://127.0.0.1:8200; vault kv metadata get -mount=secret tokenfactory'` |
 | Change one secret | open a shell: `kubectl -n vault exec -it vault-0 -- sh`, then `export VAULT_ADDR=http://127.0.0.1:8200; vault login` (paste the root token), `vault kv patch -mount=secret tokenfactory smtp-password='<new>'`; wait 2 minutes; restart the services that use it (see 3.3) |
-| Is the Secret synced? | `kubectl -n tokenfactory get secret tokenfactory-secrets` (19 keys: `kubectl -n tokenfactory get secret tokenfactory-secrets -o json \| python3 -c 'import sys,json;print(len(json.load(sys.stdin)["data"]))'`); `kubectl -n tokenfactory get pods -l app=vault-secret-syncer` |
+| Is the Secret synced? | `kubectl -n tokenfactory get secret tokenfactory-secrets` (30 keys: `kubectl -n tokenfactory get secret tokenfactory-secrets -o json \| python3 -c 'import sys,json;print(len(json.load(sys.stdin)["data"]))'`); `kubectl -n tokenfactory get pods -l app=vault-secret-syncer` |
 | Add a secret key later | add the key to `values/vaultsync.values.yaml.tmpl` (`keys:`), write it to Vault (`vault kv patch ...`), then `airgap/deploy-all.sh render app` |
 
 ## 5. Troubleshooting

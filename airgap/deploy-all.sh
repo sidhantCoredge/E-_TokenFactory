@@ -165,6 +165,7 @@ phase_render(){
     fi
     echo "  vault.yaml, secrets-store-csi.yaml and vaultsync.yaml rendered (SECRETS_BACKEND=vault, UI=$VAULT_UI)"
   fi
+  if [ "${XAILON_INTEGRATIONS:-no}" = yes ]; then cp "$ROOT/values/xailon-integrations.yaml" "$OUT/integrations.yaml"; echo "  xailon-tf-prod integrations layer ON (Persona CDD, Zendesk, Google/Microsoft ids, PKCE)"; else echo '{}' > "$OUT/integrations.yaml"; fi
   if [ -n "${CUSTOM_VALUES_YAML//[[:space:]]/}" ]; then printf '%s\n' "$CUSTOM_VALUES_YAML" > "$OUT/custom.yaml"; echo "  custom values from config.env CUSTOM_VALUES_YAML applied"; else echo '{}' > "$OUT/custom.yaml"; fi
   if [ "$EXPOSE" = clusterip ]; then cp "$ROOT/values/expose-clusterip.umbrella.yaml" "$OUT/lb-umbrella.yaml"; cp "$ROOT/values/expose-clusterip.nginx.yaml" "$OUT/lb-nginx.yaml"
   elif [ "${LB_INTERNAL:-no}" = yes ]; then cp "$ROOT/values/lb-internal.umbrella.yaml" "$OUT/lb-umbrella.yaml"; cp "$ROOT/values/lb-internal.nginx.yaml" "$OUT/lb-nginx.yaml"
@@ -306,7 +307,7 @@ secrets_vault(){
     [ -f "$KEYFILE" ] || die "Vault already holds secret/tokenfactory but $KEYFILE is missing (service keys must stay stable) - restore it from backup"
     echo "  secret/tokenfactory exists in Vault - keeping it (service keys: $KEYFILE)"; return 0; fi
   [ ! -e "$KEYFILE" ] || die "$KEYFILE exists but Vault has no secret/tokenfactory - remove the stale file or restore the Vault data"
-  local json; json=$(SMTP_PASSWORD="${SMTP_PASSWORD:-}" python3 - <<'PY'
+  local json SF="${SECRETS_FILE:-$ROOT/secrets.local.env}"; json=$(SMTP_PASSWORD="${SMTP_PASSWORD:-}" SECRETS_FILE="$SF" python3 - <<'PY'
 import json, os, secrets, base64
 g=lambda: secrets.token_hex(32)
 pw=lambda: "Aa1!"+secrets.token_hex(12)
@@ -317,10 +318,35 @@ d={"db-password":g(),"jwt-secret":jwt,"portal-jwt-secret":jwt,"admin-api-key":g(
    "kc-admin-username":"admin","kc-admin-password":pw(),"kc-db-username":"keycloak","kc-db-password":g(),
    "openfga-db-password":g(),"s3-access-key":secrets.token_hex(10),"s3-secret-key":g(),
    "stripe-webhook-secret":"","stripe-secret-key":"","smtp-password":os.environ.get("SMTP_PASSWORD",""),
-   "platform-admin-password":pw(),"platform-init-admin-password":pw()}
+   "platform-admin-password":pw(),"platform-init-admin-password":pw(),
+   "cdd-email-hmac-key":g(),"redis-password":base64.b64encode(secrets.token_bytes(32)).decode(),
+   # external integrations: empty unless you give them in secrets.local.env
+   "google-client-secret":"","microsoft-client-secret":"","persona-api-key":"","persona-webhook-secret":"",
+   "zendesk-oauth-client-id":"","zendesk-oauth-client-secret":"","zendesk-signing-secret":"","cloudflare-tunnel-token":"","random-test-secret":""}
+# optional overrides from secrets.local.env (git-ignored): one KEY=VALUE per line, only these keys
+path=os.environ.get("SECRETS_FILE","")
+if path and os.path.isfile(path):
+    import re, sys
+    over=[]
+    for n,line in enumerate(open(path),1):
+        line=line.strip()
+        if not line or line.startswith("#"): continue
+        if "=" not in line: sys.exit("%s line %d: expected KEY=VALUE"%(path,n))
+        k,v=line.split("=",1); k=k.strip(); v=v.strip()
+        if len(v)>=2 and v[0]==v[-1] and v[0] in "\"'": v=v[1:-1]
+        if k not in d: sys.exit("%s line %d: unknown key '%s' (allowed: %s)"%(path,n,k,", ".join(sorted(d))))
+        if k in ("kc-admin-password","platform-admin-password","platform-init-admin-password"):
+            if not(len(v)>=8 and re.search("[a-z]",v) and re.search("[A-Z]",v) and re.search("[0-9]",v) and re.search("[^A-Za-z0-9]",v)):
+                sys.exit("%s: %s must have at least 8 characters with upper, lower, digit and special character (Keycloak policy)"%(path,k))
+        if k=="encryption-key":
+            try: ok=len(base64.b64decode(v,validate=True))==32
+            except Exception: ok=False
+            if not ok: sys.exit("%s: encryption-key must be base64 of exactly 32 bytes (openssl rand -base64 32)"%path)
+        d[k]=v; over.append(k)
+    if over: sys.stderr.write("  overrides from %s: %s\n"%(path,", ".join(over)))
 print(json.dumps(d))
 PY
-)
+) || die "could not prepare the secrets (see the message above)"
   vexec "vault kv put -mount=secret tokenfactory - <<'__JSON__'
 $json
 __JSON__
@@ -328,7 +354,7 @@ echo stored" | grep -q stored || die "could not write secret/tokenfactory to Vau
   json=""
   local g; g(){ openssl rand -hex 32; }
   umask 077; { for k in ACCOUNTS LEDGER CONTROL RELAY WARDEN; do echo "SERVICE_KEY_TF_$k=$(g)"; done; } > "$KEYFILE"
-  echo "  19 keys written to Vault secret/tokenfactory. Service keys saved to $KEYFILE (0600) - BACK IT UP, every upgrade needs the same values."
+  echo "  30 keys written to Vault secret/tokenfactory. Service keys saved to $KEYFILE (0600) - BACK IT UP, every upgrade needs the same values."
   echo "  The Secret tokenfactory-secrets appears in $NAMESPACE when the app is installed (the chart's vault-secret-syncer mounts it through the CSI driver)."
 }
 
@@ -435,7 +461,7 @@ phase_app(){
   if [ "$BEHIND_CLOUDFLARE" != yes ]; then kubectl -n "$NAMESPACE" get secret tf-etisalat-tls >/dev/null || die "tf-etisalat-tls missing in $NAMESPACE"; fi
   echo "  pre-install checks ok (CRDs, OpenMeter API, secrets)"
   SKIP_PREFLIGHT=1 CHART_DIR="$REPO/helm/tokenfactory" RELEASE=tokenfactory NAMESPACE="$NAMESPACE" VALUES="$REPO/helm/tokenfactory/values-tf-etisalat.yaml" \
-    HELM_ARGS="-f $OUT/umbrella.yaml -f $OUT/services.yaml -f $OUT/vaultsync.yaml -f $OUT/lb-umbrella.yaml -f $OUT/lb-envoyip.yaml -f $OUT/edge.yaml -f $OUT/tlsmode.yaml -f $OUT/custom.yaml -f $OUT/service-keys.yaml --timeout 30m" \
+    HELM_ARGS="-f $OUT/umbrella.yaml -f $OUT/services.yaml -f $OUT/vaultsync.yaml -f $OUT/integrations.yaml -f $OUT/lb-umbrella.yaml -f $OUT/lb-envoyip.yaml -f $OUT/edge.yaml -f $OUT/tlsmode.yaml -f $OUT/custom.yaml -f $OUT/service-keys.yaml --timeout 30m" \
     "$REPO/helm/setup/scripts/install.sh"
 }
 
@@ -483,7 +509,7 @@ phase_dryrun(){
   write_service_keys dryrun dryrun dryrun dryrun dryrun
   [ "$SECRETS_BACKEND" = vault ] && { T csi-secrets-store "$C/secrets-store-csi-driver-1.5.6.tgz" -n kube-system -f "$OUT/secrets-store-csi.yaml"; T vault "$C/vault-0.32.0.tgz" -n "$VAULT_NAMESPACE" -f "$OUT/vault.yaml"; }
   [ "$STORAGE_BACKEND" = hpe-x10000 ] && { T hpe-csi "$C/hpe-csi-driver-3.2.0.tgz" -n hpe-storage -f "$OUT/hpe-csi.yaml"; grep -q "provisioner: csi.hpe.com" "$OUT/storageclass-hpe-x10000.yaml" && grep -q "vers=4.1" "$OUT/storageclass-hpe-x10000.yaml" && echo "  ok: StorageClass manifest"; }
-  T tokenfactory "$REPO/helm/tokenfactory" -n "$NAMESPACE" -f "$REPO/helm/tokenfactory/values-tf-etisalat.yaml" -f "$OUT/umbrella.yaml" -f "$OUT/services.yaml" -f "$OUT/vaultsync.yaml" -f "$OUT/lb-umbrella.yaml" -f "$OUT/lb-envoyip.yaml" -f "$OUT/edge.yaml" -f "$OUT/tlsmode.yaml" -f "$OUT/custom.yaml" -f "$OUT/service-keys.yaml" \
+  T tokenfactory "$REPO/helm/tokenfactory" -n "$NAMESPACE" -f "$REPO/helm/tokenfactory/values-tf-etisalat.yaml" -f "$OUT/umbrella.yaml" -f "$OUT/services.yaml" -f "$OUT/vaultsync.yaml" -f "$OUT/integrations.yaml" -f "$OUT/lb-umbrella.yaml" -f "$OUT/lb-envoyip.yaml" -f "$OUT/edge.yaml" -f "$OUT/tlsmode.yaml" -f "$OUT/custom.yaml" -f "$OUT/service-keys.yaml" \
     --set-file keycloak.theme.archive="$REPO/brands/etisalat/keycloak/theme.tar.gz.b64"
   log "dry-run PASSED - safe to run: ./deploy-all.sh all"
 }

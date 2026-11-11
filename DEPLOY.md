@@ -232,6 +232,7 @@ export SMTP_HOST="smtp.resend.com" ; export SMTP_PORT="465" ; export SMTP_USER="
 export SMTP_PASSWORD="<the Resend API key>"
 export SUPPORT_EMAIL="support@iamsaif.ai"      # the sender verified at Resend
 ```
+**Secrets:** nothing to type for the 19 TokenFactory secrets: they are generated randomly. Only the Resend API key goes in `SMTP_PASSWORD` here, and if you want to choose some values yourself (for example the admin passwords) put them in the git-ignored `secrets.local.env` before B7 (`VAULT-SECRETS.md` section 2c).
 **Vault:** `SECRETS_BACKEND="vault"` installs the Vault and fills it in phases `vault` and `secrets`. After B7, **copy `~/.etisalat-vault-init.json` (the unseal keys and root token) to a safe offline place**; Vault starts sealed after every restart and `airgap/deploy-all.sh vault` unseals it again (`VAULT-SECRETS.md`).
 The X10000 client **secret** is not written in `config.env`; give it in the shell right before B7 (and before any run of the `storage` phase): `read -rs X10000_CLIENT_SECRET; export X10000_CLIENT_SECRET`. The storage team must first provide the items of `STORAGE-HPE-CSI.md` section 2 (management address, client ID + secret, capacity, NFS access for the workers).
 `TF_TAG`, `BRAND_TAG`, `CHART_REF` are already filled (Part A). Replicas, CPU/RAM, Keycloak, Postgres and Envoy sizing are the `SIZING & HA` lines of the same file: their defaults are the **live `xailon-tf-prod` values** (Part D) and normally need no change. Nothing may still say `REPLACE_`:
@@ -294,7 +295,7 @@ kubectl -n tokenfactory logs deploy/tf-ledger --tail=200 | grep -i leader      #
 kubectl -n tokenfactory get secret tf-etisalat-ingress-tls
 kubectl -n vault get pods                                      # vault-0 Running, vault-csi-provider pods Running
 kubectl -n vault exec vault-0 -- vault status | grep -E "Initialized|Sealed"       # Initialized true, Sealed false
-kubectl -n tokenfactory get secret tokenfactory-secrets        # synced from Vault (19 keys)
+kubectl -n tokenfactory get secret tokenfactory-secrets        # synced from Vault (30 keys)
 ```
 ### B10. Etisalat brand + feature gate (the verification the developer's overlay asks for). The scripts are in the repo copy; they need `curl` and `python3`, and they read the release `tokenfactory` in namespace `tokenfactory`. The lab has no DNS, so first map the names on this VM (real Etisalat: DNS exists, skip these two lines):
 ```

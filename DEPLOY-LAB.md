@@ -156,6 +156,8 @@ airgap/deploy-all.sh dry-run
 ```
 Must end with `dry-run PASSED`. If it stops with `FATAL:`, read the message, fix it and run it again.
 
+**The 30 secrets need no input in the lab:** they are generated randomly into Vault. To choose some yourself (for example `smtp-password` or the admin passwords), create `~/etisalat/secrets.local.env` **before** 2.5 (format and rules: `VAULT-SECRETS.md` section 2c; start from `secrets.local.env.example`). To change a value after the deployment: `VAULT-SECRETS.md` section 4.
+
 ### 2.5 Deploy everything (one command, 40–90 min)
 ```
 airgap/deploy-all.sh all 2>&1 | tee ~/etisalat-deploy.log

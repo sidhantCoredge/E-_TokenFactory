@@ -1,0 +1,34 @@
+# Optional layer = the app-level settings live in xailon-tf-prod (helm get values, chart 0.17.7). Enabled by XAILON_INTEGRATIONS=yes in config.env.
+# These integrations call EXTERNAL services (Persona, Zendesk, Google, Microsoft): they only work where those hosts are reachable.
+# IDs below are public identifiers, not secrets; the matching secrets come from Vault (secrets.local.env).
+global:
+  cdd:
+    enabled: true
+    enforceNewSignups: true          # new sign-ups must pass Persona verification -> needs Persona reachable
+  zendesk:
+    enabled: true
+    environmentId: xailon
+    subdomain: netgroup-56094
+    keyId: app_6aeb1a35eae4bada83b641c1
+    fields: { organisation: "6505457448479", page: "6505440719263", role: "6505423663647" }
+    requests: { enabled: true, groupID: "6499303521439" }
+    context:
+      enabled: false
+      subdomain: netgroup-56094
+      oauth: { scopes: "tickets:read tickets:write users:read groups:read" }
+    securityReport: { enabled: false }
+tf-accounts:
+  config:
+    oauthPkce: { enabled: true }
+    persona:
+      activeTemplate: cdd
+      caseCreation: workflow
+      caseTemplateId: ctmpl_AwT4cBnbxNKRjau1xCZnczNBkbbtvf
+      environment: production
+      supportEmail: support@xailon.ai
+      templates:
+        cdd: { inquiryTemplateId: itmpl_AwT4cBna7wsrN5Jk9wzjwV7kvsmwpV }
+tf-auth:
+  config:
+    google: { clientId: "1016632709140-3hgn5s9uf0id56n97d69ctc2fjlno1lk.apps.googleusercontent.com" }
+    microsoft: { clientId: "bde0be11-0b7e-4825-8d67-4e496051ce41", tenantId: common }
