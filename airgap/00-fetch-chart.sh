@@ -5,6 +5,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . airgap/env.sh
+if [ "${ALLOW_EXTERNAL:-0}" != 1 ]; then
+  case "$REPO" in "$PWD"/*) ;; *) echo "ERROR: REPO=$REPO is outside the package folder $PWD. Run:  unset ROOT BUNDLE_DIR REPO   and start this script again (ALLOW_EXTERNAL=1 overrides this check)."; exit 1;; esac
+fi
 [ -n "${CHART_REPO:-}" ] && [ -n "${CHART_REF:-}" ] || { echo "set CHART_REPO and CHART_REF in config.env"; exit 1; }
 D="$REPO"
 if [ -d "$D/.git" ] && [ "$(git -C "$D" rev-parse HEAD 2>/dev/null)" = "$CHART_REF" ]; then

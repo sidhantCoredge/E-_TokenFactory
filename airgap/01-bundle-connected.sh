@@ -4,6 +4,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . airgap/env.sh
+# The bundle and the chart checkout must live INSIDE this package folder (DEPLOY.md A6 copies this folder). A stale BUNDLE_DIR / REPO in the terminal would put them elsewhere.
+if [ "${ALLOW_EXTERNAL:-0}" != 1 ]; then
+  case "$BUNDLE_DIR" in "$PWD"/*) ;; *) echo "ERROR: BUNDLE_DIR=$BUNDLE_DIR is outside the package folder $PWD. Run:  unset ROOT BUNDLE_DIR REPO   and start this script again (ALLOW_EXTERNAL=1 overrides this check)."; exit 1;; esac
+  case "$REPO" in "$PWD"/*) ;; *) echo "ERROR: REPO=$REPO is outside the package folder $PWD. Run:  unset ROOT BUNDLE_DIR REPO   and start this script again."; exit 1;; esac
+fi
 mkdir -p "$BUNDLE_DIR"/{tars,charts,crds,jars,repo,tools}
 case "$TF_TAG$BRAND_TAG" in *REPLACE*) echo "set TF_TAG and BRAND_TAG in config.env first"; exit 1;; esac
 command -v skopeo >/dev/null || { echo "skopeo missing (brew install skopeo)"; exit 1; }
