@@ -103,3 +103,7 @@ This is used **only when `secret/tokenfactory` does not exist yet** (first run).
 ## 6. Status
 Offline verification only: charts and images rendered (`airgap/deploy-all.sh dry-run` passes, all images are in the bundle) and the shell logic of the Vault configuration was tested against a mock `vault`. It has **not** been run against a real Vault and cluster yet. Report the first failing step with its output.
 Not tested: the empty-value keys through the CSI provider (see the table above), and Vault on the X10000 NFS volume (file storage on NFS is common for small data but check latency with the storage team).
+
+## 5. Same secrets as xailon-tf-prod, integrations off
+`secrets.local.env` can hold the exact values of the live xailon-tf-prod `tokenfactory-secrets` (read it with `kubectl get secret` there; never commit the file).
+Persona CDD / Zendesk / Google / Microsoft stay OFF while `XAILON_INTEGRATIONS="no"` in `config.env`; their secrets are still stored in Vault so switching them on later needs no secret change.

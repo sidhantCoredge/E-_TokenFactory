@@ -204,7 +204,9 @@ phase_jar(){
   log "Keycloak SPI jar server"
   if [ $JAR_INCLUSTER = 0 ]; then echo "  using your own URL: $KEYCLOAK_JAR_URL (nothing to host)"; return 0; fi
   local name; name="$(basename "$JAR_FILE")"
-  kubectl -n "$NAMESPACE" create configmap keycloak-spi-jar --from-file="$JAR_FILE" --dry-run=client -o yaml | kc apply -f - >/dev/null
+  # the brand theme is served from the same pod: passing it to Helm (--set-file) would store it twice in the release Secret and exceed Helm's 1 MiB limit
+  local TD; TD="$(mktemp -d)"; base64 -d < "$REPO/brands/etisalat/keycloak/theme.tar.gz.b64" > "$TD/theme.tar.gz" || die "cannot decode $REPO/brands/etisalat/keycloak/theme.tar.gz.b64"; cp "$JAR_FILE" "$TD/"
+  kubectl -n "$NAMESPACE" create configmap keycloak-spi-jar --from-file="$TD/$name" --from-file="$TD/theme.tar.gz" --dry-run=client -o yaml | kc apply -f - >/dev/null; rm -rf "$TD"
   cat <<YAML | kc apply -f - >/dev/null
 apiVersion: apps/v1
 kind: Deployment
@@ -460,8 +462,9 @@ phase_app(){
   else kubectl -n "$NAMESPACE" get secret tokenfactory-secrets >/dev/null || die "tokenfactory-secrets missing in $NAMESPACE"; fi
   if [ "$BEHIND_CLOUDFLARE" != yes ]; then kubectl -n "$NAMESPACE" get secret tf-etisalat-tls >/dev/null || die "tf-etisalat-tls missing in $NAMESPACE"; fi
   echo "  pre-install checks ok (CRDs, OpenMeter API, secrets)"
-  SKIP_PREFLIGHT=1 CHART_DIR="$REPO/helm/tokenfactory" RELEASE=tokenfactory NAMESPACE="$NAMESPACE" VALUES="$REPO/helm/tokenfactory/values-tf-etisalat.yaml" \
-    HELM_ARGS="-f $OUT/umbrella.yaml -f $OUT/services.yaml -f $OUT/vaultsync.yaml -f $OUT/integrations.yaml -f $OUT/lb-umbrella.yaml -f $OUT/lb-envoyip.yaml -f $OUT/edge.yaml -f $OUT/tlsmode.yaml -f $OUT/custom.yaml -f $OUT/service-keys.yaml --timeout 30m" \
+  : > "$OUT/empty-theme"   # install.sh always passes --set-file keycloak.theme.archive=<THEME_FILE>; an empty file + keycloak.theme.url keeps the theme out of the release Secret
+  SKIP_PREFLIGHT=1 THEME_FILE="$OUT/empty-theme" CHART_DIR="$REPO/helm/tokenfactory" RELEASE=tokenfactory NAMESPACE="$NAMESPACE" VALUES="$REPO/helm/tokenfactory/values-tf-etisalat.yaml" \
+    HELM_ARGS="--set keycloak.theme.enabled=true --set keycloak.theme.url=http://keycloak-spi.${NAMESPACE}.svc.cluster.local:8080/theme.tar.gz -f $OUT/umbrella.yaml -f $OUT/services.yaml -f $OUT/vaultsync.yaml -f $OUT/integrations.yaml -f $OUT/lb-umbrella.yaml -f $OUT/lb-envoyip.yaml -f $OUT/edge.yaml -f $OUT/tlsmode.yaml -f $OUT/custom.yaml -f $OUT/service-keys.yaml --timeout 30m" \
     "$REPO/helm/setup/scripts/install.sh"
 }
 
@@ -509,14 +512,20 @@ phase_dryrun(){
   write_service_keys dryrun dryrun dryrun dryrun dryrun
   [ "$SECRETS_BACKEND" = vault ] && { T csi-secrets-store "$C/secrets-store-csi-driver-1.5.6.tgz" -n kube-system -f "$OUT/secrets-store-csi.yaml"; T vault "$C/vault-0.32.0.tgz" -n "$VAULT_NAMESPACE" -f "$OUT/vault.yaml"; }
   [ "$STORAGE_BACKEND" = hpe-x10000 ] && { T hpe-csi "$C/hpe-csi-driver-3.2.0.tgz" -n hpe-storage -f "$OUT/hpe-csi.yaml"; grep -q "provisioner: csi.hpe.com" "$OUT/storageclass-hpe-x10000.yaml" && grep -q "vers=4.1" "$OUT/storageclass-hpe-x10000.yaml" && echo "  ok: StorageClass manifest"; }
+  : > "$OUT/empty-theme"
   T tokenfactory "$REPO/helm/tokenfactory" -n "$NAMESPACE" -f "$REPO/helm/tokenfactory/values-tf-etisalat.yaml" -f "$OUT/umbrella.yaml" -f "$OUT/services.yaml" -f "$OUT/vaultsync.yaml" -f "$OUT/integrations.yaml" -f "$OUT/lb-umbrella.yaml" -f "$OUT/lb-envoyip.yaml" -f "$OUT/edge.yaml" -f "$OUT/tlsmode.yaml" -f "$OUT/custom.yaml" -f "$OUT/service-keys.yaml" \
-    --set-file keycloak.theme.archive="$REPO/brands/etisalat/keycloak/theme.tar.gz.b64"
+    --set-file keycloak.theme.archive="$OUT/empty-theme" --set keycloak.theme.enabled=true --set keycloak.theme.url="http://keycloak-spi.${NAMESPACE}.svc.cluster.local:8080/theme.tar.gz"
   log "dry-run PASSED - safe to run: ./deploy-all.sh all"
 }
 
 [ $# -ge 1 ] || { sed -n 2,8p "$0"; exit 1; }
 case "$1" in
   dry-run) phase_dryrun; exit 0;;
+  reset-secrets)   # BEFORE the app is installed only: drop secret/tokenfactory + service keys so the `secrets` phase can write new values (secrets.local.env)
+    [ "$SECRETS_BACKEND" = vault ] || die "reset-secrets is for SECRETS_BACKEND=vault"
+    if helm status tokenfactory -n "$NAMESPACE" >/dev/null 2>&1; then die "the tokenfactory release exists: changing keys now would break it (use vault kv patch, VAULT-SECRETS.md section 4)"; fi
+    vexec 'vault kv metadata delete -mount=secret tokenfactory && echo deleted' | grep -q deleted || die "could not delete secret/tokenfactory"
+    rm -f "$KEYFILE"; echo "  secret/tokenfactory and $KEYFILE removed - now run: airgap/deploy-all.sh secrets"; exit 0;;
   all) run=("${PHASES[@]}");;
   --from) [ -n "${2:-}" ] || die "--from <phase>"; run=(); on=0; for p in "${PHASES[@]}"; do [ "$p" = "$2" ] && on=1; [ $on = 1 ] && run+=("$p"); done; [ ${#run[@]} -gt 0 ] || die "unknown phase $2";;
   *) run=("$@");;
