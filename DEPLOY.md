@@ -22,12 +22,27 @@ Lab note: a 1-node cluster cannot hold 3 Postgres instances, so the lab uses `SI
 ## PART A — [MAC] build the bundle (needs internet)
 This git repo holds scripts, values and docs only. Two things are **not** in git (private or huge) and are created here, git-ignored: `ai-gateway-platform/` (the chart checkout, pinned to one commit) and `bundle/` (image tars, charts, CRDs, Keycloak jar, linux `helm`/`kubectl`). Both are copied to the install VM in A6.
 
-**Where to run Part A.** Everything in Part A runs **on your Mac, in a terminal, from the package root**: the folder that contains `config.env`, `airgap/`, `values/` and `DEPLOY.md` (the folder you cloned from GitHub, for example `~/Downloads/E-_TokenFactory`; on the author's Mac it is `~/Downloads/E-_TokenFactory-upload`). Do **not** `cd` into `airgap/`, and never run `airgap/env.sh` on its own: it only loads the settings for the other scripts. The Mac's default shell (zsh) is fine; every script starts with its own `bash`.
+**Where to run Part A.** Everything in Part A runs **on your Mac, in a terminal, from the package root**: the folder that contains `config.env`, `airgap/`, `values/` and `DEPLOY.md`. Do **not** `cd` into `airgap/`, and never run `airgap/env.sh` on its own: it only loads the settings for the other scripts. The Mac's default shell (zsh) is fine; every script starts with its own `bash`.
+
+**Step 0: the package folder must have the name this guide uses: `~/Downloads/E-_TokenFactory`.** Every command below starts with `cd ~/Downloads/E-_TokenFactory`. Look at what you have:
+```
+ls -d ~/Downloads/E-_TokenFactory ~/Downloads/E-_TokenFactory-upload 2>/dev/null
+```
+| What the command prints | What to do (once) |
+|---|---|
+| `/Users/<you>/Downloads/E-_TokenFactory` | nothing: the name already matches |
+| only `.../E-_TokenFactory-upload` (your working copy, with `bundle/` if you built it) | rename it so the guide's paths work: `mv ~/Downloads/E-_TokenFactory-upload ~/Downloads/E-_TokenFactory` |
+| nothing | clone it: `git clone git@github.com:sidhantCoredge/E-_TokenFactory.git ~/Downloads/E-_TokenFactory`. A fresh clone has **no** `bundle/` and no `ai-gateway-platform/` (they are not in git): build them in the next step |
+Then check you are in the right place:
+```
+cd ~/Downloads/E-_TokenFactory
+pwd                                        # /Users/<you>/Downloads/E-_TokenFactory
+ls config.env airgap values zalando        # the four names, no error
+```
 
 **A0. Do you already have the bundle? Check each line first.** The bundle (`bundle/`, about 5.8 GB) and the chart checkout (`ai-gateway-platform/`) are **not in GitHub**: they are built on your Mac and stay in the package folder (git-ignored). If all seven checks are fine, skip to Part B. If any check fails, do the steps named in the last column (they are A1 - A5 below), then run the seven checks again.
 ```
 cd ~/Downloads/E-_TokenFactory
-pwd
 ```
 | # | Check (run it) | You must see | If not: create it with |
 |---|---|---|---|
@@ -70,7 +85,7 @@ Result: `bundle/tars/*.tar`, `bundle/charts`, `bundle/crds`, `bundle/jars` (the 
 
 **A6. Copy everything to the install VM** (resumable; the folder includes the git-ignored `ai-gateway-platform/` and `bundle/`). First time as written; when you copy again later add `--exclude config.env` so your filled-in file on the VM is not overwritten
 ```
-cd ~/Downloads/E-_TokenFactory                 # your package folder: `ls bundle/tars/*.tar | wc -l` must print 56
+cd ~/Downloads/E-_TokenFactory                 # `ls bundle/tars/*.tar | wc -l` must print 56 before you copy
 rsync -avP --exclude .git --exclude Real-values-of-tf-prod.yaml ./ <vm-user>@<VM-IP>:~/etisalat/
 # lab: see DEPLOY-LAB.md 1.3
 # no network path Mac -> VM (real air-gap)? copy the folder on a USB disk / approved transfer, then `tar -xf` it as ~/etisalat on the VM
@@ -104,9 +119,38 @@ ssh <vm-user>@<VM-IP>
 cd ~/etisalat
 ls                                  # must show: airgap  ai-gateway-platform  bundle  config.env  values  zalando  DEPLOY.md
 ```
-### B2. Check prerequisites (nothing is installed on this VM: `kubectl` and `helm` come inside the bundle)
+### B2. Check prerequisites (nothing has to be installed on this VM except the few standard tools below: `kubectl` and `helm` come inside the bundle)
+**B2a. The tools this VM needs.** Run this block as written. It prints `ok` or `MISSING` for every tool:
 ```
-for t in bash perl python3 openssl tar ssh scp; do command -v $t >/dev/null && echo "ok $t" || echo "MISSING $t"; done
+for t in bash perl python3 openssl tar awk sed grep base64 ssh scp; do command -v $t >/dev/null && echo "ok $t" || echo "MISSING $t"; done
+```
+| Tool | Used for | Ubuntu 24.04 package | If it prints `MISSING` |
+|---|---|---|---|
+| `bash` | every script | `bash` (always there) | the VM is not a normal Linux server: use another VM |
+| `perl` | fills the templates, patches charts | `perl-base` (always there) / `perl` | **install it** (below) |
+| `python3` | key generation, Vault init/unseal, JSON | `python3` (there on every Ubuntu server image) | **install it** (below) |
+| `openssl` | random keys, certificate checks | `openssl` | **install it** (below) |
+| `tar` | chart patching | `tar` (always there) | **install it** (below) |
+| `awk`, `sed`, `grep`, `base64` | text and encoding | `gawk`/`mawk`, `sed`, `grep`, `coreutils` (always there) | **install it** (below) |
+| `ssh`, `scp` | loading the image tars on the workers (`NODE_LOAD_MODE="ssh"`) | `openssh-client` | **install it** (below) |
+`kubectl` and `helm` are **not** in this list: they are in `bundle/tools/` and the scripts put them on the PATH themselves. `make`, `envsubst` and `skopeo` are NOT needed here. `airgap/deploy-all.sh check` (and `dry-run`) repeats this test and names every missing tool and its Ubuntu package at once.
+
+**If a tool is missing** (an air-gapped VM has no internet, so use one of these):
+1. **The VM's own OS media or internal package mirror** (normal for an Etisalat server): `sudo apt-get install -y <package>` (or `sudo dnf install <package>` on RHEL).
+2. **Offline `.deb` files** (no mirror): on **any machine with internet that runs Ubuntu 24.04** (a VM or a container is fine), download the packages together with their dependencies, copy the folder to the install VM (USB / scp), and install them there:
+   ```
+   mkdir -p ~/os-debs && cd ~/os-debs
+   apt-get update
+   apt-get download $(apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances perl python3 openssl tar gawk openssh-client | grep '^\w' | sort -u)
+   tar -czf ~/os-debs.tgz -C ~ os-debs                       # copy os-debs.tgz to the install VM
+   # on the install VM:
+   tar -xzf os-debs.tgz && cd os-debs && sudo dpkg -i *.deb        # packages that are already installed are simply updated
+   ```
+   Run the `for t in ...` block again: every line must say `ok`.
+3. The VM is not Ubuntu (for example RHEL): the same tools exist there under the same names (`perl`, `python3`, `openssl`, `tar`, `gawk`, `openssh-clients`); install them from the RHEL media.
+
+**B2b. Package, cluster and storage checks.**
+```
 ls ai-gateway-platform/helm/tokenfactory/templates/ingress.yaml bundle/tars/INDEX bundle/tools/helm bundle/tools/kubectl bundle/jars/*.jar
 ls bundle/tars/*.tar | wc -l                      # must print 56
 ls bundle/charts/hpe-csi-driver-3.2.0.tgz         # the HPE CSI chart (storage)
@@ -120,7 +164,6 @@ kubectl --kubeconfig ~/etisalat.kubeconfig get nodes --no-headers | grep -c ' Re
 kubectl --kubeconfig ~/etisalat.kubeconfig get sc                    # existing StorageClasses (the storage for TokenFactory comes from the HPE X10000: STORAGE-HPE-CSI.md)
 kubectl --kubeconfig ~/etisalat.kubeconfig describe node <worker> | grep -i taints     # workers must accept normal pods (Taints: <none>)
 ```
-If a tool is missing (only `perl`, `python3`, `openssl` are ever needed) install it from the VM's OS package mirror. `make`, `envsubst`, `skopeo` are NOT needed here.
 ### B3. SSH from the VM to every worker (the image loader uses it) — passwordless `sudo` is required
 ```
 ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519      # only if the VM has no key yet

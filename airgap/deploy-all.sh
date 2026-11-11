@@ -43,7 +43,15 @@ kc(){ if [ $DRY = 1 ]; then echo "  [dry-run] kubectl $*"; else kubectl "$@"; fi
 
 phase_check(){
   log "check"
-  for t in kubectl helm openssl perl python3; do need $t; done   # kubectl+helm come from bundle/tools; the rest are standard on Ubuntu
+  # Tools this machine needs. kubectl and helm come from bundle/tools; the rest are standard on Ubuntu 24.04 server. Checked together, so ONE message lists every missing tool.
+  local miss="" t pk="" REQ="kubectl helm openssl perl python3 tar awk sed grep base64"
+  [ "${IMAGE_MODE:-tar}" = tar ] && [ "${NODE_LOAD_MODE:-}" = ssh ] && REQ="$REQ ssh scp"
+  for t in $REQ; do command -v "$t" >/dev/null 2>&1 || { miss="$miss $t"; case "$t" in
+      perl) pk="$pk perl";; python3) pk="$pk python3";; openssl) pk="$pk openssl";; tar) pk="$pk tar";; awk) pk="$pk gawk";;
+      sed|grep|base64) pk="$pk coreutils/sed/grep";; ssh|scp) pk="$pk openssh-client";; esac; }; done
+  [ -z "$miss" ] || die "missing tools on this machine:$miss
+   Ubuntu packages:$pk   (install them from the machine's OS media / internal mirror: DEPLOY.md B2, 'If a tool is missing').
+   kubectl and helm are NOT packages: they come with the bundle (bundle/tools), so a missing kubectl/helm means the bundle was not copied completely."
   [ -f "$KUBECONFIG_FILE" ] || die "KUBECONFIG_FILE=$KUBECONFIG_FILE not found"
   if [ "${IMAGE_MODE:-tar}" = registry ]; then need skopeo; case "$REGISTRY" in registry.etisalat.local*) die "IMAGE_MODE=registry but REGISTRY is still the placeholder name";; esac; fi
   local bad; bad=$(env | grep -E '^[A-Za-z0-9_]+=.*REPLACE_' || true)   # EFFECTIVE values: a later line in config.env (or an override block) wins over an earlier REPLACE_ line

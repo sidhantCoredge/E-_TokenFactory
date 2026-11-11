@@ -14,13 +14,28 @@ Every command below is meant to be copied as written. Lines starting with `#` ar
 
 ---
 ## PART 1 — On your Mac (needs the VPN to the jumphost)
-All commands of this part run **on your Mac, in a terminal, from the package root** (the folder that contains `config.env`, `airgap/`, `values/`; below it is `~/Downloads/E-_TokenFactory`, on the author's Mac `~/Downloads/E-_TokenFactory-upload`). Do not `cd` into `airgap/`.
+All commands of this part run **on your Mac, in a terminal, from the package root**: the folder that contains `config.env`, `airgap/` and `values/`. Do not `cd` into `airgap/`.
+
+**Step 0: the package folder must have the name this guide uses: `~/Downloads/E-_TokenFactory`.** Every command below starts with `cd ~/Downloads/E-_TokenFactory`. Look at what you have:
+```
+ls -d ~/Downloads/E-_TokenFactory ~/Downloads/E-_TokenFactory-upload 2>/dev/null
+```
+| What the command prints | What to do (once) |
+|---|---|
+| `/Users/<you>/Downloads/E-_TokenFactory` | nothing: the name already matches |
+| only `.../E-_TokenFactory-upload` (your working copy, with `bundle/` if you built it) | rename it so the guide's paths work: `mv ~/Downloads/E-_TokenFactory-upload ~/Downloads/E-_TokenFactory` |
+| nothing | clone it: `git clone git@github.com:sidhantCoredge/E-_TokenFactory.git ~/Downloads/E-_TokenFactory`. A fresh clone has **no** `bundle/` and no `ai-gateway-platform/` (they are not in git): build them in the next step |
+Then check you are in the right place:
+```
+cd ~/Downloads/E-_TokenFactory
+pwd                                        # /Users/<you>/Downloads/E-_TokenFactory
+ls config.env airgap values zalando        # the four names, no error
+```
 
 ### 1.1 Do you already have the bundle? Check each line
 The bundle (`bundle/`, 5.8 GB) and the chart checkout (`ai-gateway-platform/`) are **not in GitHub**: they are built on your Mac and stay in the package folder (git-ignored).
 ```
 cd ~/Downloads/E-_TokenFactory
-pwd
 ```
 | # | Check (run it) | You must see | If not: what to do |
 |---|---|---|---|
@@ -49,7 +64,7 @@ Then run the seven checks of 1.1 again.
 ### 1.3 Copy the package to the jumphost
 This copies the whole package folder, including the git-ignored `bundle/` and `ai-gateway-platform/` (≈ 6 GB; unchanged files are skipped, old tars that are no longer used are removed; the jumphost has ~16 GB free). **Do not type a path to the package: `cd` into it and copy "the current folder" (`./`).** First prove that you are in the right folder and that the bundle is complete (the seven checks of 1.1):
 ```
-cd ~/Downloads/E-_TokenFactory           # YOUR package folder (on the author's Mac: ~/Downloads/E-_TokenFactory-upload)
+cd ~/Downloads/E-_TokenFactory
 ls config.env airgap values zalando      # the four names, no error
 ls bundle/tars/*.tar | wc -l             # must print 56 (if it prints 0 or an error, the bundle is not built: do box A of 1.2 first)
 ```
