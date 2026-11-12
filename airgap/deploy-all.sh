@@ -214,6 +214,9 @@ phase_jar(){
   # the brand theme is served from the same pod: passing it to Helm (--set-file) would store it twice in the release Secret and exceed Helm's 1 MiB limit
   local TD; TD="$(mktemp -d)"; base64 -d < "$REPO/brands/etisalat/keycloak/theme.tar.gz.b64" > "$TD/theme.tar.gz" || die "cannot decode $REPO/brands/etisalat/keycloak/theme.tar.gz.b64"; cp "$JAR_FILE" "$TD/"
   kubectl -n "$NAMESPACE" create configmap keycloak-spi-jar --from-file="$TD/$name" --from-file="$TD/theme.tar.gz" --dry-run=client -o yaml | kc apply --server-side --force-conflicts -f - >/dev/null; rm -rf "$TD"   # server-side: client-side apply copies the whole ConfigMap (theme ~450 KB) into the last-applied annotation, limit 256 KB
+  # the 2 replicas must NOT share a node: a Keycloak pod that restarts while this server is unreachable stays in its init container. required on a multi-node cluster, soft on a 1-node lab
+  local SPI_AFF="requiredDuringSchedulingIgnoredDuringExecution: [ { topologyKey: kubernetes.io/hostname, labelSelector: { matchLabels: { app.kubernetes.io/name: keycloak-spi } } } ]"
+  [ "${SINGLE_NODE:-no}" = yes ] && SPI_AFF="preferredDuringSchedulingIgnoredDuringExecution: [ { weight: 100, podAffinityTerm: { topologyKey: kubernetes.io/hostname, labelSelector: { matchLabels: { app.kubernetes.io/name: keycloak-spi } } } } ]"
   cat <<YAML | kc apply -f - >/dev/null
 apiVersion: apps/v1
 kind: Deployment
@@ -224,6 +227,7 @@ spec:
   template:
     metadata: { labels: { app.kubernetes.io/name: keycloak-spi } }
     spec:
+      affinity: { podAntiAffinity: { $SPI_AFF } }
       containers:
       - name: httpd
         image: $REGISTRY/busybox:1.37.0

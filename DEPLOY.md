@@ -83,10 +83,18 @@ airgap/01-bundle-connected.sh
 It ends with `== done. total size:`, `image tars: 56 of 56` and `bundle COMPLETE`. If A3 just fetched a new chart commit, run A5 again: it re-vendors the chart dependencies (finished image tars are skipped). Anything listed as `FAILED images` is a real error: fix it and re-run (finished images are skipped). Every image the chart renders is in `airgap/images.txt` (checked by rendering all releases with `helm template`).
 Result: `bundle/tars/*.tar`, `bundle/charts`, `bundle/crds`, `bundle/jars` (the Keycloak plugin jar, see B4), `bundle/tools/helm` and `bundle/tools/kubectl` (Linux binaries for the air-gap side).
 
+**A5b. OS packages for the install VM** (an air-gapped VM usually lacks `perl`, `python3`, `openssl` or `rsync`; they cannot be downloaded there). Needs **Docker running** on the Mac. It downloads the Ubuntu `.deb` files, one folder per tool with its dependencies, into `bundle/os-debs/`. Use the same Ubuntu release as the VM (`grep VERSION_ID /etc/os-release` on the VM; default 24.04)
+```
+cd ~/Downloads/E-_TokenFactory
+airgap/fetch-os-debs.sh                          # other release: UBUNTU_VERSION=22.04 airgap/fetch-os-debs.sh
+ls bundle/os-debs                                # one folder per package: perl python3 openssl tar gawk openssh-client rsync
+```
+It is copied with the rest of the bundle in A6, but the VM needs `rsync` itself for A6: send the folder first with `scp` (B2a, method 2).
+
 **A6. Copy everything to the install VM** (resumable; the folder includes the git-ignored `ai-gateway-platform/` and `bundle/`). First time as written; when you copy again later add `--exclude config.env` so your filled-in file on the VM is not overwritten
 ```
 cd ~/Downloads/E-_TokenFactory                 # `ls bundle/tars/*.tar | wc -l` must print 56 before you copy
-rsync -avP --exclude .git --exclude Real-values-of-tf-prod.yaml ./ <vm-user>@<VM-IP>:~/etisalat/
+rsync -avP --exclude .git --exclude Real-values-of-tf-prod.yaml ./ <vm-user>@<VM-IP>:~/etisalat/      # needs `rsync` on the VM too (A5b/B2a installs it); without it: tar -cf - --exclude .git --exclude Real-values-of-tf-prod.yaml . | ssh <vm-user>@<VM-IP> 'mkdir -p ~/etisalat && tar -xf - -C ~/etisalat'
 # lab: see DEPLOY-LAB.md 1.3
 # no network path Mac -> VM (real air-gap)? copy the folder on a USB disk / approved transfer, then `tar -xf` it as ~/etisalat on the VM
 ```
@@ -137,16 +145,17 @@ for t in bash perl python3 openssl tar awk sed grep base64 ssh scp; do command -
 
 **If a tool is missing** (an air-gapped VM has no internet, so use one of these):
 1. **The VM's own OS media or internal package mirror** (normal for an Etisalat server): `sudo apt-get install -y <package>` (or `sudo dnf install <package>` on RHEL).
-2. **Offline `.deb` files** (no mirror): on **any machine with internet that runs Ubuntu 24.04** (a VM or a container is fine), download the packages together with their dependencies, copy the folder to the install VM (USB / scp), and install them there:
+2. **Offline `.deb` files from the Mac (A5b)** (no mirror; the usual case in a real air-gap). `python3`, `perl`, `openssl` and `rsync` are the ones most often missing on a minimal server. `airgap/fetch-os-debs.sh` (A5b) already downloaded them into `bundle/os-debs/<package>/`. Copy that folder to the VM with `scp` (it does not need `rsync`), then install **only the packages that printed `MISSING`**:
    ```
-   mkdir -p ~/os-debs && cd ~/os-debs
-   apt-get update
-   apt-get download $(apt-cache depends --recurse --no-recommends --no-suggests --no-conflicts --no-breaks --no-replaces --no-enhances perl python3 openssl tar gawk openssh-client | grep '^\w' | sort -u)
-   tar -czf ~/os-debs.tgz -C ~ os-debs                       # copy os-debs.tgz to the install VM
-   # on the install VM:
-   tar -xzf os-debs.tgz && cd os-debs && sudo dpkg -i *.deb        # packages that are already installed are simply updated
+   # on the Mac
+   cd ~/Downloads/E-_TokenFactory
+   scp -r bundle/os-debs <vm-user>@<VM-IP>:~/os-debs
+   # on the VM (example: python3, perl and openssl were MISSING)
+   cd ~/os-debs
+   sudo ./install.sh python3 perl openssl            # add `rsync` etc. if they are missing too; it prints `installed <package>` or `FAILED <package>`
    ```
-   Run the `for t in ...` block again: every line must say `ok`.
+   `install.sh` runs `dpkg -i` on each package's folder (up to 3 times: the files of one package must be installed in dependency order and a glob is alphabetical). Tested offline (no network) on a clean Ubuntu 24.04 amd64: `python3`, `perl`, `openssl`, `rsync` were installed and worked. Run the `for t in ...` block again: every line must say `ok`. The `.deb` files must match the VM's Ubuntu release and be amd64; `python3 -m http.server` (the image-loader web server of `NODE_LOAD_MODE="pod"`) is not used on this cluster, but `python3` itself is: Vault init/unseal and secret generation need it.
+   No Docker on the Mac? Use any internet machine with Ubuntu of the same release: `apt-get install --download-only --reinstall <package>` and copy `/var/cache/apt/archives/*.deb` (one package at a time).
 3. The VM is not Ubuntu (for example RHEL): the same tools exist there under the same names (`perl`, `python3`, `openssl`, `tar`, `gawk`, `openssh-clients`); install them from the RHEL media.
 
 **B2b. Package, cluster and storage checks.**
@@ -262,6 +271,26 @@ Order, with what each prints: `check` → `prepare` → `render` → `ns` → **
 airgap/deploy-all.sh --from <phase>        # e.g. --from openmeter
 ```
 Never delete `~/.etisalat-service-keys.env` (created by the `secrets` phase; every upgrade needs the same values). Back it up now: `cp ~/.etisalat-service-keys.env <safe place>`.
+
+### B8a. Every name a browser needs: DNS and certificate (no Cloudflare: `BEHIND_CLOUDFLARE="no"`, nothing goes through a tunnel)
+| Name | Who opens it | DNS A record | Served by | Certificate (TLS Secret in namespace `tokenfactory`) |
+|---|---|---|---|---|
+| `portal.<DOMAIN>` | customers: the console (keys, playground, billing) | `172.22.100.241` | existing Ingress-NGINX | `tf-etisalat-ingress-tls` |
+| `admin.<DOMAIN>` | platform admins | `172.22.100.241` | existing Ingress-NGINX | `tf-etisalat-ingress-tls` |
+| `www.<DOMAIN>` | the public site | `172.22.100.241` | existing Ingress-NGINX | `tf-etisalat-ingress-tls` |
+| `auth.<DOMAIN>` | **every login**: the browser is redirected here (Keycloak, `https://auth.<DOMAIN>/auth`) | `172.22.100.241` | existing Ingress-NGINX | `tf-etisalat-ingress-tls` |
+| `api.<DOMAIN>` | API clients (OpenAI-compatible) **and the portal's playground, from the user's browser** | `172.22.100.242` (`ENVOY_LB_IP`) | Envoy Gateway, which terminates TLS itself | `tf-etisalat-tls` (listener `*.<DOMAIN>`) |
+| `vault.<DOMAIN>` | only if `VAULT_UI="true"` (the operators) | `172.22.100.241` | existing Ingress-NGINX, allowed networks `VAULT_UI_ALLOW` | `tf-etisalat-ingress-tls` |
+* **One certificate is enough: `*.<DOMAIN>` plus `<DOMAIN>` as SAN** (the lab uses exactly that). Without a wildcard the SAN list must contain `portal. admin. www. auth. api.` (and `vault.` if the UI is on). `deploy-all.sh` creates BOTH Secrets from the same `TLS_CERT` / `TLS_KEY`. PEM, leaf certificate first, then the intermediates.
+* **Every machine that opens these names must trust the CA that signed it** (laptops of the admins and customers, and the clients of the API). With an internal Etisalat CA, that CA is already in the corporate browsers; for servers/CI install it in their trust store.
+* **DNS must be resolvable from the clients** (internal DNS or the `hosts` file). The names must be written exactly like this: Keycloak issues tokens for `https://auth.<DOMAIN>/auth`; opening the portal by IP does not work. The bare `<DOMAIN>` is not served (no ingress host): add a redirect on Etisalat's side if people will type it.
+* **Not needed:** no DNS and no certificate for `registry.etisalat.local` (only an image-name prefix, the images are imported from the tars), none for `keycloak-spi`, `pgdb`, `redis` or `vault` inside the cluster (CoreDNS resolves them), and no host name for the docs (the chart's docs web has no host of its own in this package).
+* **Not a browser name, but a login needs it:** the e-mail one-time code at login is sent through SMTP (`SMTP_HOST`, default `smtp.resend.com:465`). Air-gapped, Etisalat must give an internal SMTP relay (change `SMTP_HOST/PORT/USER/SSL/STARTTLS`) or open that one outbound connection.
+* **Check from a client machine** (replace `<DOMAIN>`):
+```
+for h in portal admin www auth api; do printf "%-7s " $h; getent hosts $h.<DOMAIN> | awk '{print $1}'; done          # 241 x4 (+ vault), 242 for api
+for h in portal auth api; do echo | openssl s_client -connect $h.<DOMAIN>:443 -servername $h.<DOMAIN> 2>/dev/null | openssl x509 -noout -subject -enddate -ext subjectAltName | tr '\n' ' '; echo; done      # SAN covers the name, not expired
+```
 
 ### B8. DNS records and first login
 `verify` printed both addresses. Create these DNS records (internal DNS or `/etc/hosts` of the clients):
