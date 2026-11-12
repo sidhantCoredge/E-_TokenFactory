@@ -32,6 +32,7 @@ export INGRESS_CLASS ENVOY_REPLICAS ENVOY_PDB_MIN_AVAILABLE KEYCLOAK_REPLICAS KE
 : "${SVC_TF_ACCOUNTS:=3 50m 64Mi 200m 256Mi}" "${SVC_TF_ADMIN_WEB:=3 none}" "${SVC_TF_AUTH:=3 none}" "${SVC_TF_BABEL:=3 25m 32Mi 300m 256Mi}" "${SVC_TF_CONTROL:=3 none}"
 : "${SVC_TF_DOCS_WEB:=1 50m 96Mi 300m 256Mi}" "${SVC_TF_LEDGER:=3 none}" "${SVC_TF_OPS:=3 20m 48Mi 250m 128Mi}" "${SVC_TF_PORTAL_WEB:=3 50m 32Mi 200m 1Gi}" "${SVC_TF_RELAY:=3 none}"
 : "${SVC_TF_SHIM:=3 25m 256Mi 1 1Gi}" "${SVC_TF_SITE_WEB:=1 50m 64Mi 300m 256Mi}" "${SVC_TF_WARDEN:=3 none}"
+: "${REDIS_ARCH:=sentinel}" "${REDIS_MAXMEMORY:=3gb}" "${REDIS_PVC_SIZE:=10Gi}"
 : "${RES_OPENFGA:=- 64Mi - 256Mi}" "${RES_MINIO:=50m 128Mi 300m 512Mi}" "${RES_REDIS:=100m 1Gi 1 4Gi}"
 INST_DEF="$PG_INSTANCES"; [ "${SINGLE_NODE:-no}" = yes ] && INST_DEF=1
 PG_SET=(--set registry="$REGISTRY" --set-string postgresVersion="$PG_VERSION" --set volume.storageClass="$STORAGE_CLASS" --set numberOfInstances="$INST_DEF" --set-string volume.size="$PG_VOLUME_SIZE"
@@ -126,7 +127,13 @@ gen_services(){
       echo "$n:"; [ "$n" = tf-docs-web ] && echo "  enabled: $DOCS_WEB_ENABLED"
       echo "  replicas: $rep"; res_yaml "  " "$@"
     done
-    for n in openfga minio redis; do var="RES_$(echo $n | tr a-z A-Z)"; set -- ${!var}; echo "$n:"; res_yaml "  " "$@"; done
+    case "$REDIS_ARCH" in sentinel|standalone) ;; *) die "REDIS_ARCH='$REDIS_ARCH': use sentinel or standalone";; esac
+    local ranti=hard; [ "${SINGLE_NODE:-no}" = yes ] && ranti=soft
+    for n in openfga minio redis; do var="RES_$(echo $n | tr a-z A-Z)"; set -- ${!var}; echo "$n:"; res_yaml "  " "$@"
+      if [ "$n" = redis ]; then echo "  maxmemory: \"$REDIS_MAXMEMORY\""; echo "  persistence: { size: $REDIS_PVC_SIZE }"; echo "  sentinel: { antiAffinity: $ranti }"; fi
+    done
+    echo "global:"; echo "  redis:"; echo "    architecture: $REDIS_ARCH"
+    [ "$REDIS_ARCH" = sentinel ] && { echo "    auth: { enabled: true, requirePassword: true }"; echo "    existingSecret: tokenfactory-secrets"; echo "    passwordKey: redis-password"; }
     local mode="$KEYCLOAK_ANTIAFFINITY"; [ "${SINGLE_NODE:-no}" = yes ] && mode=preferred
     echo "keycloak:"; echo "  affinity:"; echo "    podAntiAffinity:"
     if [ "$mode" = required ]; then
@@ -137,7 +144,7 @@ gen_services(){
       echo "        - weight: 100"; echo "          podAffinityTerm:"; echo "            topologyKey: kubernetes.io/hostname"; echo "            labelSelector:"; echo "              matchLabels: { app.kubernetes.io/name: keycloak }"
     fi
   } > "$f"
-  echo "  services.yaml generated (replicas/CPU/RAM from config.env, Keycloak anti-affinity: $mode)"
+  echo "  services.yaml generated (replicas/CPU/RAM from config.env, Keycloak anti-affinity: $mode, Redis: $REDIS_ARCH)"
 }
 
 phase_render(){
@@ -206,7 +213,7 @@ phase_jar(){
   local name; name="$(basename "$JAR_FILE")"
   # the brand theme is served from the same pod: passing it to Helm (--set-file) would store it twice in the release Secret and exceed Helm's 1 MiB limit
   local TD; TD="$(mktemp -d)"; base64 -d < "$REPO/brands/etisalat/keycloak/theme.tar.gz.b64" > "$TD/theme.tar.gz" || die "cannot decode $REPO/brands/etisalat/keycloak/theme.tar.gz.b64"; cp "$JAR_FILE" "$TD/"
-  kubectl -n "$NAMESPACE" create configmap keycloak-spi-jar --from-file="$TD/$name" --from-file="$TD/theme.tar.gz" --dry-run=client -o yaml | kc apply -f - >/dev/null; rm -rf "$TD"
+  kubectl -n "$NAMESPACE" create configmap keycloak-spi-jar --from-file="$TD/$name" --from-file="$TD/theme.tar.gz" --dry-run=client -o yaml | kc apply --server-side --force-conflicts -f - >/dev/null; rm -rf "$TD"   # server-side: client-side apply copies the whole ConfigMap (theme ~450 KB) into the last-applied annotation, limit 256 KB
   cat <<YAML | kc apply -f - >/dev/null
 apiVersion: apps/v1
 kind: Deployment
@@ -392,7 +399,7 @@ phase_secrets(){
     --from-literal=kc-db-username=keycloak --from-literal=kc-db-password="$(g)" --from-literal=openfga-db-password="$(g)" \
     --from-literal=s3-access-key="$(openssl rand -hex 10)" --from-literal=s3-secret-key="$(g)" \
     --from-literal=stripe-webhook-secret='' --from-literal=stripe-secret-key='' \
-    --from-literal=smtp-password="${SMTP_PASSWORD:-}" \
+    --from-literal=smtp-password="${SMTP_PASSWORD:-}" --from-literal=redis-password="$(openssl rand -base64 32)" \
     --from-literal=platform-admin-password="$(pw)" --from-literal=platform-init-admin-password="$(pw)" >/dev/null
   umask 077; { for k in ACCOUNTS LEDGER CONTROL RELAY WARDEN; do echo "SERVICE_KEY_TF_$k=$(g)"; done; } > "$KEYFILE"
   echo "  created. Service keys saved to $KEYFILE (0600) - BACK IT UP, every upgrade needs the same values."
@@ -477,6 +484,11 @@ phase_verify(){
   kubectl get pods -A -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.image}{"\n"}{end}{range .spec.initContainers[*]}{.image}{"\n"}{end}{end}' | sort -u | grep -vE "^$REGISTRY/|^registry.k8s.io/pause|^$" | grep -vE "kube-|calico|flannel|cilium|coredns|etcd|csi|metrics-server" || echo "  none"
   if [ "$SECRETS_BACKEND" = vault ]; then echo "-- vault: $(vstatus)"; kubectl -n "$NAMESPACE" get secret tokenfactory-secrets >/dev/null 2>&1 && echo "   Secret tokenfactory-secrets synced from Vault: $(kubectl -n "$NAMESPACE" get secret tokenfactory-secrets -o json | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["data"]))') keys" || echo "   WARNING: Secret tokenfactory-secrets not present yet (kubectl -n $NAMESPACE get pods -l app=vault-secret-syncer)"; fi
   echo "-- keycloak HA:"; kubectl -n "$NAMESPACE" get sts keycloak; kubectl -n "$NAMESPACE" get pdb | grep -i keycloak || true
+  if [ "${REDIS_ARCH:-sentinel}" = sentinel ]; then
+    echo "-- redis HA (sentinel):"; kubectl -n "$NAMESPACE" get sts redis; kubectl -n "$NAMESPACE" get pdb | grep -i redis || true
+    echo "   primary: $(kubectl -n "$NAMESPACE" exec redis-0 -c sentinel -- redis-cli -p 26379 SENTINEL get-master-addr-by-name tf-redis 2>/dev/null | head -1)"
+    kubectl -n "$NAMESPACE" exec redis-0 -c sentinel -- redis-cli -p 26379 SENTINEL ckquorum tf-redis 2>&1 | sed 's/^/   /' || true
+  else echo "-- redis: standalone (no HA)"; fi
   echo "-- ingress:"; kubectl -n "$NAMESPACE" get ingress tokenfactory
   local ING_SVC ING_IP
   if [ "$INGRESS_CONTROLLER" = existing ]; then

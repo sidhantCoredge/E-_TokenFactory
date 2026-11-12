@@ -51,6 +51,8 @@ Location: Mac `~/Downloads/ethisalat/config.env`; install VM `~/etisalat/config.
 | **`ENVOY_REPLICAS`** | **`6`** | Envoy data-plane pods (**minimum 6**; prod runs 10). Envoy has **no CPU/RAM requests or limits** (same as prod — it takes all the inference load) | `tf-gateway-resources.envoyProxy…replicas` |
 | `ENVOY_PDB_MIN_AVAILABLE` | `1` | Envoy PodDisruptionBudget | `…envoyPDB.minAvailable` |
 | **`KEYCLOAK_REPLICAS`** | **`3`** | Keycloak HA pods (Infinispan cluster) | `keycloak.replicaCount` |
+| **`REDIS_ARCH`** | **`sentinel`** | Redis HA: 3 pods (redis + sentinel each), automatic failover; `standalone` = 1 pod, no HA. Fresh install only | `global.redis.architecture`, password required (`redis-password` in `tokenfactory-secrets`) |
+| `REDIS_MAXMEMORY` / `REDIS_PVC_SIZE` | `3gb` / `10Gi` | per Redis pod (as xailon-tf-prod); `RES_REDIS` is also per pod | `redis.maxmemory`, `redis.persistence.size` |
 | `KEYCLOAK_MEM_REQUEST/LIMIT`, `KEYCLOAK_HEAP`, `KEYCLOAK_ANTIAFFINITY` | `1Gi`/`2Gi`, `-Xms512m -Xmx2g …`, `required` | as xailon-tf-prod (memory only; one pod per node) | `keycloak.resources`, `jvmHeapOpts`, `affinity` |
 | `PG_VERSION`, **`PG_INSTANCES`** | `16`, **`3`** | Postgres major version (same as Xailon's Azure Postgres 16) and HA instances (forced to 1 by `SINGLE_NODE=yes`) | – (pgdb chart) |
 | `PG_VOLUME_SIZE`, `PG_CPU_REQUEST/LIMIT`, `PG_MEM_REQUEST/LIMIT`, `PG_MAX_CONNECTIONS` | `20Gi`, `1`/`4`, `2Gi`/`8Gi`, `300` | Zalando pgdb sizing | – (pgdb chart) |
