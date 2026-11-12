@@ -165,6 +165,7 @@ kubectl --kubeconfig ~/etisalat.kubeconfig get sc                    # existing 
 kubectl --kubeconfig ~/etisalat.kubeconfig describe node <worker> | grep -i taints     # workers must accept normal pods (Taints: <none>)
 ```
 ### B3. SSH from the VM to every worker (the image loader uses it) — passwordless `sudo` is required
+Nodes of this cluster: control plane `ed-kca-inf-tf-cn-01/02/03` = 172.22.100.21/.22/.23 (no application pods, no images needed); workers `ed-kca-inf-tf-cpu-wrk-001..004` = 172.22.100.24/.25/.26/.27 (all images go here). `NODE_LOAD_MODE="pod"` is not used on this cluster: it needs a helper image that the nodes cannot pull in an air-gap.
 ```
 ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519      # only if the VM has no key yet
 for ip in 172.22.100.24 172.22.100.25 172.22.100.26 172.22.100.27; do ssh-copy-id <ssh-user>@$ip; done
@@ -226,13 +227,13 @@ export SECRETS_BACKEND="vault"                # secrets live in a DEDICATED Hash
 export VAULT_STORAGE_SIZE="10Gi"
 export VAULT_UI="true"                         # open the Vault web UI at https://vault.<DOMAIN> (needs DNS + a certificate that covers it); "false" = no UI. VAULT-SECRETS.md section 2b
 export VAULT_UI_ALLOW="172.22.100.0/22"         # networks allowed to open the UI
-export NODE_LOAD_MODE="ssh"
-export NODES="<ssh-user>@172.22.100.24 <ssh-user>@172.22.100.25 <ssh-user>@172.22.100.26 <ssh-user>@172.22.100.27"
+export NODE_LOAD_MODE="ssh"                    # images are copied to every worker with scp+ssh and imported with `sudo ctr` (NOT "pod": that mode is for the AKS lab only)
+export NODES="<ssh-user>@172.22.100.24 <ssh-user>@172.22.100.25 <ssh-user>@172.22.100.26 <ssh-user>@172.22.100.27"   # the 4 workers cpu-wrk-001..004; the control nodes .21/.22/.23 are not needed
 export SMTP_HOST="smtp.resend.com" ; export SMTP_PORT="465" ; export SMTP_USER="resend" ; export SMTP_SSL="true" ; export SMTP_STARTTLS="false"
 export SMTP_PASSWORD="<the Resend API key>"
 export SUPPORT_EMAIL="support@iamsaif.ai"      # the sender verified at Resend
 ```
-**Secrets:** nothing to type for the 19 TokenFactory secrets: they are generated randomly. Only the Resend API key goes in `SMTP_PASSWORD` here, and if you want to choose some values yourself (for example the admin passwords) put them in the git-ignored `secrets.local.env` before B7 (`VAULT-SECRETS.md` section 2c).
+**Secrets:** nothing to type for the 30 TokenFactory secrets: they are generated randomly. Only the Resend API key goes in `SMTP_PASSWORD` here, and if you want to choose some values yourself (for example the admin passwords) put them in the git-ignored `secrets.local.env` before B7 (`VAULT-SECRETS.md` section 2c).
 **Vault:** `SECRETS_BACKEND="vault"` installs the Vault and fills it in phases `vault` and `secrets`. After B7, **copy `~/.etisalat-vault-init.json` (the unseal keys and root token) to a safe offline place**; Vault starts sealed after every restart and `airgap/deploy-all.sh vault` unseals it again (`VAULT-SECRETS.md`).
 The X10000 client **secret** is not written in `config.env`; give it in the shell right before B7 (and before any run of the `storage` phase): `read -rs X10000_CLIENT_SECRET; export X10000_CLIENT_SECRET`. The storage team must first provide the items of `STORAGE-HPE-CSI.md` section 2 (management address, client ID + secret, capacity, NFS access for the workers).
 `TF_TAG`, `BRAND_TAG`, `CHART_REF` are already filled (Part A). Replicas, CPU/RAM, Keycloak, Postgres and Envoy sizing are the `SIZING & HA` lines of the same file: their defaults are the **live `xailon-tf-prod` values** (Part D) and normally need no change. Nothing may still say `REPLACE_`:
