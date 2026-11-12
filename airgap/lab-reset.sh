@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# LAB ONLY. Removes the WHOLE TokenFactory / Etisalat stack from the Azure single-node lab cluster `aks-etisalat-test`, so the next deployment starts from zero.
+# LAB ONLY. Removes the WHOLE TokenFactory / Etisalat stack from the Azure lab cluster `aks-etisalat-test` (1 or more nodes), so the next deployment starts from zero.
 #   airgap/lab-reset.sh --dry-run     print every command, change nothing
 #   airgap/lab-reset.sh               asks you to type RESET-LAB, then resets the cluster and the jumphost's Etisalat files
 #   airgap/lab-reset.sh -y            same without the question
 #   airgap/lab-reset.sh --images      ALSO removes the cached image tars' images from the node (the next `images` phase re-imports all ~56 tars)
 #   airgap/lab-reset.sh --no-files    keep the Etisalat files in the home directory (service keys, Vault init file, logs, lab certificate)
 # SAFETY: it only talks to the kubeconfig ~/etisalat.kubeconfig (never to the default kubeconfig), refuses to run unless that cluster is the lab
-# (exactly one node named aks-sys1-*, context aks-etisalat-test*), and removes only the objects of this stack. It never touches kube-system, the AKS add-ons,
+# (1-5 nodes, all named aks-sys1-*, context aks-etisalat-test*), and removes only the objects of this stack. It touches kube-system only to uninstall the Helm release csi-secrets-store (installed by deploy-all.sh); never the AKS add-ons,
 # other clusters, or any Xailon / production file on the jumphost.
 set -uo pipefail
 DRY=0; YES=0; IMAGES=0; FILES=1
@@ -29,8 +29,8 @@ say "Guard: is this the lab cluster?"
 NODES=$(K get nodes -o name 2>/dev/null) || { echo "cannot reach the cluster with $KCFG"; exit 1; }
 CTX=$(K config current-context 2>/dev/null || true)
 echo "  context: $CTX"; echo "  nodes:   $(echo $NODES | tr '\n' ' ')"
-[ "$(echo "$NODES" | wc -l | tr -d ' ')" = 1 ] && echo "$NODES" | grep -q '^node/aks-sys1-' && echo "$CTX" | grep -q 'aks-etisalat-test' \
-  || { echo "ABORT: this is not the lab cluster (need exactly 1 node aks-sys1-* and context aks-etisalat-test*). Nothing was changed."; exit 1; }
+[ -n "$NODES" ] && [ -z "$(echo "$NODES" | grep -v '^node/aks-sys1-')" ] && [ "$(echo "$NODES" | wc -l | tr -d ' ')" -le 5 ] && echo "$CTX" | grep -q 'aks-etisalat-test' \
+  || { echo "ABORT: this is not the lab cluster (need 1-5 nodes, ALL named aks-sys1-*, and context aks-etisalat-test*). Nothing was changed."; exit 1; }
 echo "  OK: aks-etisalat-test"
 if [ $DRY = 0 ] && [ $YES = 0 ]; then
   echo; echo "This DELETES the whole TokenFactory/Etisalat lab stack (namespaces: $NS, their volumes, the CRDs and cluster roles of the stack)."
@@ -40,6 +40,9 @@ fi
 say "1/8 Helm releases of the stack"
 H list -A --no-headers 2>/dev/null | awk -v ns=" $NS " 'index(ns," "$2" ")>0 {print $1" "$2}' | while read -r rel n; do
   echo "  uninstall $rel ($n)"; run helm --kubeconfig "$KCFG" -n "$n" uninstall "$rel" --timeout 5m; done
+# the Secrets Store CSI driver is installed by deploy-all.sh into kube-system (not one of the stack namespaces): remove exactly that release, nothing else in kube-system
+if H list -n kube-system --no-headers 2>/dev/null | awk '{print $1}' | grep -qx csi-secrets-store; then
+  echo "  uninstall csi-secrets-store (kube-system)"; run helm --kubeconfig "$KCFG" -n kube-system uninstall csi-secrets-store --timeout 5m; fi
 
 say "2/8 Custom resources that block namespace deletion (finalizers)"
 for kind in postgresqls.acid.zalan.do clickhouseinstallations.clickhouse.altinity.com clickhousekeeperinstallations.clickhouse-keeper.altinity.com; do
@@ -76,13 +79,15 @@ BOUND=$(K get pv --no-headers 2>/dev/null | awk '$5=="Bound"{print $1" "$6}' || 
 
 if [ $IMAGES = 1 ]; then
   say "7b Images cached on the node (prefix registry.etisalat.local/)"
-  NODE=$(K get nodes -o jsonpath='{.items[0].metadata.name}'); IMG="${LOADER_DEBUG_IMAGE:-mcr.microsoft.com/azurelinux/busybox:1.36}"
+  IMG="${LOADER_DEBUG_IMAGE:-mcr.microsoft.com/azurelinux/busybox:1.36}"
+  for NODE in $(K get nodes -o jsonpath='{.items[*].metadata.name}'); do
+  PODN="img-prune-${NODE##*-}"
   if [ $DRY = 1 ]; then echo "  [dry-run] privileged pod on $NODE ($IMG): ctr -n k8s.io images rm every registry.etisalat.local/* image"; else
-    K -n default delete pod img-prune --ignore-not-found >/dev/null 2>&1
+    K -n default delete pod "$PODN" --ignore-not-found >/dev/null 2>&1
     cat <<YAML | K -n default apply -f - >/dev/null
 apiVersion: v1
 kind: Pod
-metadata: { name: img-prune }
+metadata: { name: $PODN }
 spec:
   restartPolicy: Never
   nodeName: $NODE
@@ -96,8 +101,9 @@ spec:
     volumeMounts: [ { name: host, mountPath: /host } ]
   volumes: [ { name: host, hostPath: { path: / } } ]
 YAML
-    for i in $(seq 1 120); do ph=$(K -n default get pod img-prune -o jsonpath='{.status.phase}' 2>/dev/null); [ "$ph" = Succeeded ] || [ "$ph" = Failed ] && break; sleep 5; done
-    K -n default logs img-prune 2>&1 | tail -2 | sed 's/^/  /'; K -n default delete pod img-prune >/dev/null 2>&1; fi
+    for i in $(seq 1 120); do ph=$(K -n default get pod "$PODN" -o jsonpath='{.status.phase}' 2>/dev/null); [ "$ph" = Succeeded ] || [ "$ph" = Failed ] && break; sleep 5; done
+    echo "  $NODE:"; K -n default logs "$PODN" 2>&1 | tail -2 | sed 's/^/    /'; K -n default delete pod "$PODN" >/dev/null 2>&1; fi
+  done
 fi
 
 if [ $FILES = 1 ]; then
